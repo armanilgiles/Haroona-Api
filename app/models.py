@@ -1,6 +1,23 @@
-from sqlalchemy import Column, Integer, String, ForeignKey, UniqueConstraint,Numeric
+from sqlalchemy import Column, Integer, String, ForeignKey, UniqueConstraint, Numeric, Boolean
 from sqlalchemy.orm import relationship
 from app.database import Base
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    # Using Google's `sub` as the stable user id for now (MVP friendly).
+    # If you later want an internal UUID, add a separate column and migrate.
+    id = Column(String(64), primary_key=True, index=True)
+    email = Column(String(255), unique=True, index=True, nullable=False)
+    name = Column(String(255), nullable=True)
+    avatar = Column(String(500), nullable=True)
+
+    # One-time welcome/about screen gate
+    welcome_seen = Column(Boolean, nullable=False, default=False)
+
+    def __repr__(self):
+        return f"<User {self.email}>"
 
 
 class Country(Base):

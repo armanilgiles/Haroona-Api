@@ -2,6 +2,17 @@ from pydantic import BaseModel
 from decimal import Decimal
 from pydantic import BaseModel, HttpUrl
 
+
+class UserMeOut(BaseModel):
+    id: str
+    email: str
+    name: str | None = None
+    avatar: HttpUrl | None = None
+    welcome_seen: bool
+
+    class Config:
+        from_attributes = True
+
 class CountryOut(BaseModel):
     id: int
     code: str
