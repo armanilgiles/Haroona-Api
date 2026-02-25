@@ -1,23 +1,19 @@
 import os
-from fastapi import APIRouter, HTTPException, Response, Depends
+import requests
+from fastapi import APIRouter, HTTPException, Response, Request, Depends
 from pydantic import BaseModel
-from google.oauth2 import id_token
-from google.auth.transport import requests
-
 from sqlalchemy.orm import Session
 
-
-from app.auth.jwt import create_access_token
 from app.database import get_db
-from app.models import User
+from app.auth.dependencies import get_current_user
+from app.auth.jwt import create_access_token
 
 router = APIRouter()
-
+GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 
 class GoogleAuthRequest(BaseModel):
-    id_token: str
-
+    access_token: str
 
 @router.post("/logout")
 def logout(response: Response):
@@ -25,7 +21,7 @@ def logout(response: Response):
         key="access_token", 
         path="/", 
         httponly=True, 
-        secure=os.getenv("COOKIE_SECURE", "false").lower() == "true",
+        secure=False,  # True in prod
         samesite="lax",
     )
     
@@ -35,78 +31,65 @@ def logout(response: Response):
 
 
 @router.post("/auth/google")
-def google_auth(
-    data: GoogleAuthRequest,
-    response: Response,
-    db: Session = Depends(get_db),
-):
-    try:
-        idinfo = id_token.verify_oauth2_token(
-            data.id_token,
-            requests.Request(),
-            GOOGLE_CLIENT_ID
-        )
-    except ValueError:
-        raise HTTPException(status_code=401, detail="Invalid Google token")
+def google_auth(data: GoogleAuthRequest, response: Response):
+    r = requests.get(
+        GOOGLE_USERINFO_URL,
+        headers={"Authorization": f"Bearer {data.access_token}"},
+        timeout=10,
+    )
 
-    # Trusted Google identity
-    google_id = idinfo["sub"]
-    email = idinfo.get("email")
-    name = idinfo.get("name")
-    avatar = idinfo.get("picture")
+    if r.status_code != 200:
+        raise HTTPException(status_code=401, detail=f"Google token rejected: {r.text}")
 
+    profile = r.json()
+    google_id = profile.get("sub")
+    email = profile.get("email")
+    name = profile.get("name")
+    avatar = profile.get("picture")
+
+    if not google_id:
+        raise HTTPException(status_code=401, detail="Google userinfo missing sub")
     if not email:
         raise HTTPException(status_code=400, detail="Google account has no email")
 
-    # Find or create your app user (this is what enables `welcome_seen` to persist).
-    user = db.query(User).filter(User.id == str(google_id)).first()
-    if not user:
-        user = User(
-            id=str(google_id),
-            email=email,
-            name=name,
-            avatar=avatar,
-            welcome_seen=False,
-        )
-        db.add(user)
-        db.commit()
-        db.refresh(user)
-    else:
-        # Keep profile fresh (optional)
-        changed = False
-        if user.email != email:
-            user.email = email
-            changed = True
-        if name and user.name != name:
-            user.name = name
-            changed = True
-        if avatar and user.avatar != avatar:
-            user.avatar = avatar
-            changed = True
-        if changed:
-            db.add(user)
-            db.commit()
-            db.refresh(user)
+    jwt_token = create_access_token({"sub": str(google_id), "email": email})
 
-    access_token = create_access_token({
-        "sub": user.id,
-        "email": user.email,
-    })
-
-    # 🔥 MVP BEST PRACTICE: HttpOnly cookie
+    # IMPORTANT: secure=True blocks cookies on http://localhost
+    is_prod = os.getenv("ENV", "dev").lower() in {"prod", "production"}
     response.set_cookie(
         key="access_token",
-        value=access_token,
+        value=jwt_token,
         httponly=True,
-        secure=os.getenv("COOKIE_SECURE", "false").lower() == "true",
+        secure=is_prod,   # False locally, True in prod (https)
         samesite="lax",
-        max_age=60 * 60 * 24 * 7
+        max_age=60 * 60 * 24 * 7,
+        path="/",
     )
 
-    return {
-        "id": user.id,
-        "email": user.email,
-        "name": user.name,
-        "avatar": user.avatar,
-        "welcome_seen": user.welcome_seen,
-    }
+    return {"email": email, "name": name, "avatar": avatar}
+
+
+
+
+
+@router.get("/me")
+def me(request: Request, db: Session = Depends(get_db)):
+    try:
+        user = get_current_user(request, db)
+
+        return {
+            "authenticated": True,
+            "user": {
+                "id": user.id,
+                "email": user.email,
+                "name": user.name,
+                "avatar": user.avatar,
+                "welcome_seen": user.welcome_seen,
+            },
+        }
+    except Exception:
+        # Guest user
+        return {
+            "authenticated": False,
+            "user": None,
+        }

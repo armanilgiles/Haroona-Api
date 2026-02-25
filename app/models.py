@@ -40,6 +40,10 @@ class Brand(Base):
     name = Column(String(150), nullable=False)
     country_id = Column(Integer, ForeignKey("countries.id"), nullable=False)
 
+    # Optional: used by UI for handoff/logo display.
+    # You can store a fully qualified URL (https://...) or a frontend-relative path (e.g. "/logos/macy.png").
+    logo_url = Column(String(500), nullable=True)
+
     country = relationship("Country", back_populates="brands")
 
     __table_args__ = (
@@ -61,12 +65,19 @@ class Product(Base):
     external_id = Column(String(200), nullable=False)
     source = Column(String(50), nullable=False)  # e.g. "rakuten", "awin"
 
+    # Merchant/advertiser id (useful for deterministic ordering + UI analytics)
+    advertiser_id = Column(String(150), nullable=True)
+
     # Core info
     name = Column(String(255), nullable=False)
     price = Column(Numeric(10, 2), nullable=True)
     currency = Column(String(3), nullable=False)
 
     affiliate_url = Column(String, nullable=False)
+
+    # Optional: product image fields (used by UI's productImage)
+    product_image_url = Column(String(800), nullable=True)
+    product_image_alt = Column(String(255), nullable=True)
 
     # Relationships
     brand_id = Column(Integer, ForeignKey("brands.id"), nullable=False)
