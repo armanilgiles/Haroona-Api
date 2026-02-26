@@ -18,10 +18,14 @@ def transform_rakuten_products(
         product = Product(
             external_id=p["productId"],
             source="rakuten",
+            advertiser_id=p.get("advertiserId"),
             name=p["productName"],
             price=Decimal(p["price"]),
             currency=p["currency"],
             affiliate_url=p["clickUrl"],
+            # Some Rakuten feeds expose imageUrl/imageAlt (or similar). We store it if present.
+            product_image_url=(p.get("productImageUrl") or p.get("imageUrl") or p.get("productImage")),
+            product_image_alt=(p.get("productImageAlt") or p.get("imageAlt")),
             brand_id=brand.id,
         )
 

@@ -15,3 +15,13 @@ SessionLocal = sessionmaker(
 )
 
 Base = declarative_base()
+
+
+# Shared DB dependency for FastAPI endpoints.
+# Keeps auth + other routers consistent and avoids circular imports from app.main.
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
