@@ -1,7 +1,13 @@
+import os
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
 
-DATABASE_URL = "postgresql://mapmystyle_user:123123@localhost:5432/mapmystyle_db"
+
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL is not set")
+
 
 engine = create_engine(
     DATABASE_URL,
@@ -17,8 +23,6 @@ SessionLocal = sessionmaker(
 Base = declarative_base()
 
 
-# Shared DB dependency for FastAPI endpoints.
-# Keeps auth + other routers consistent and avoids circular imports from app.main.
 def get_db():
     db = SessionLocal()
     try:

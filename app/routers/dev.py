@@ -7,8 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.data.mock_products_ui import MOCK_UI_PRODUCTS
-from app.models import Brand, Country, Product
-
+from app.models import Brand, City, Country, Product
 
 router = APIRouter(prefix="/dev", tags=["dev"])
 
@@ -23,6 +22,44 @@ def _get_or_create_country(db: Session, code: str, name: str) -> Country:
     db.add(c)
     db.flush()
     return c
+
+
+def _get_or_create_city(
+    db: Session,
+    *,
+    slug: str,
+    name: str,
+    country_id: int,
+    latitude: float,
+    longitude: float,
+    marker_color: str | None,
+    image_url: str | None,
+    followers: int,
+) -> City:
+    existing = db.query(City).filter(City.slug == slug).first()
+    if existing:
+        existing.name = name
+        existing.country_id = country_id
+        existing.latitude = latitude
+        existing.longitude = longitude
+        existing.marker_color = marker_color
+        existing.image_url = image_url
+        existing.followers = followers
+        return existing
+
+    city = City(
+        slug=slug,
+        name=name,
+        country_id=country_id,
+        latitude=latitude,
+        longitude=longitude,
+        marker_color=marker_color,
+        image_url=image_url,
+        followers=followers,
+    )
+    db.add(city)
+    db.flush()
+    return city
 
 
 def _get_or_create_brand(db: Session, name: str, country_id: int, logo_url: str | None) -> Brand:
@@ -42,7 +79,7 @@ def _get_or_create_brand(db: Session, name: str, country_id: int, logo_url: str 
     return b
 
 
-def _upsert_product(db: Session, p: dict, brand_id: int):
+def _upsert_product(db: Session, p: dict, brand_id: int, city_id: int | None):
     external_id = p["productId"]
     source = "mock"
 
@@ -53,23 +90,6 @@ def _upsert_product(db: Session, p: dict, brand_id: int):
         .first()
     )
 
-    if existing:
-        # Update fields if they changed
-        existing.name = p.get("productName") or existing.name
-        existing.currency = p.get("currency") or existing.currency
-        existing.affiliate_url = p.get("affiliateUrl") or existing.affiliate_url
-        existing.advertiser_id = p.get("advertiserId") or existing.advertiser_id
-        existing.product_image_url = (p.get("productImage") or {}).get("url") or existing.product_image_url
-        existing.product_image_alt = (p.get("productImage") or {}).get("alt") or existing.product_image_alt
-        price_str = p.get("price")
-        if price_str:
-            try:
-                existing.price = Decimal(price_str)
-            except Exception:
-                pass
-        existing.brand_id = brand_id
-        return existing
-
     price_val = None
     price_str = p.get("price")
     if price_str:
@@ -77,6 +97,24 @@ def _upsert_product(db: Session, p: dict, brand_id: int):
             price_val = Decimal(price_str)
         except Exception:
             price_val = None
+
+    if existing:
+        existing.name = p.get("productName") or existing.name
+        existing.currency = p.get("currency") or existing.currency
+        existing.affiliate_url = p.get("affiliateUrl") or existing.affiliate_url
+        existing.advertiser_id = p.get("advertiserId") or existing.advertiser_id
+        existing.product_image_url = (p.get("productImage") or {}).get("url") or existing.product_image_url
+        existing.product_image_alt = (p.get("productImage") or {}).get("alt") or existing.product_image_alt
+        existing.brand_id = brand_id
+        existing.city_id = city_id
+        existing.category = p.get("category")
+        existing.style = p.get("style")
+        existing.vibe = p.get("vibe")
+        existing.is_best_seller = bool(p.get("isBestSeller", False))
+        existing.is_active = True
+        if price_val is not None:
+            existing.price = price_val
+        return existing
 
     prod = Product(
         external_id=external_id,
@@ -89,6 +127,12 @@ def _upsert_product(db: Session, p: dict, brand_id: int):
         product_image_url=(p.get("productImage") or {}).get("url"),
         product_image_alt=(p.get("productImage") or {}).get("alt"),
         brand_id=brand_id,
+        city_id=city_id,
+        category=p.get("category"),
+        style=p.get("style"),
+        vibe=p.get("vibe"),
+        is_best_seller=bool(p.get("isBestSeller", False)),
+        is_active=True,
     )
     db.add(prod)
     return prod
@@ -96,11 +140,6 @@ def _upsert_product(db: Session, p: dict, brand_id: int):
 
 @router.post("/seed-ui")
 def seed_ui(db: Session = Depends(get_db)):
-    """Seed UI-aligned sample data for local dev.
-
-    This makes /products return the exact shape your UI expects.
-    """
-
     created = 0
     updated = 0
 
@@ -110,6 +149,23 @@ def seed_ui(db: Session = Depends(get_db)):
             code=item.get("countryCode") or "US",
             name=item.get("countryName") or "United States",
         )
+
+        city_id = None
+        city_slug = item.get("citySlug")
+        city_name = item.get("cityName")
+        if city_slug and city_name:
+            city = _get_or_create_city(
+                db,
+                slug=city_slug,
+                name=city_name,
+                country_id=country.id,
+                latitude=float(item.get("latitude", 0)),
+                longitude=float(item.get("longitude", 0)),
+                marker_color=item.get("markerColor"),
+                image_url=item.get("cityImageUrl"),
+                followers=int(item.get("followers", 0)),
+            )
+            city_id = city.id
 
         brand = _get_or_create_brand(
             db,
@@ -125,7 +181,7 @@ def seed_ui(db: Session = Depends(get_db)):
             .first()
         )
 
-        _upsert_product(db, item, brand_id=brand.id)
+        _upsert_product(db, item, brand_id=brand.id, city_id=city_id)
 
         if before:
             updated += 1
@@ -138,5 +194,5 @@ def seed_ui(db: Session = Depends(get_db)):
         "status": "ok",
         "products_created": created,
         "products_updated": updated,
-        "note": "Now call GET /products and you should see productImage + logoImage.",
+        "note": "Seeded city-aware UI data. Now call GET /cities and GET /feed/products.",
     }
