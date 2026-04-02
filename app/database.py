@@ -1,7 +1,14 @@
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, declarative_base
+import os
+from typing import Generator
 
-DATABASE_URL = "postgresql://mapmystyle_user:123123@localhost:5432/mapmystyle_db"
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
+
+
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL is not set")
+
 
 engine = create_engine(
     DATABASE_URL,
@@ -9,17 +16,15 @@ engine = create_engine(
 )
 
 SessionLocal = sessionmaker(
+    bind=engine,
     autocommit=False,
     autoflush=False,
-    bind=engine,
 )
 
 Base = declarative_base()
 
 
-# Shared DB dependency for FastAPI endpoints.
-# Keeps auth + other routers consistent and avoids circular imports from app.main.
-def get_db():
+def get_db() -> Generator[Session, None, None]:
     db = SessionLocal()
     try:
         yield db

@@ -1,14 +1,8 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import List, Optional
 
 from pydantic import BaseModel, HttpUrl, Field
-
-
-# ----------------------------
-# Auth / user
-# ----------------------------
 
 
 class UserMeOut(BaseModel):
@@ -20,11 +14,6 @@ class UserMeOut(BaseModel):
 
     class Config:
         from_attributes = True
-
-
-# ----------------------------
-# Countries / brands
-# ----------------------------
 
 
 class CountryOut(BaseModel):
@@ -48,7 +37,6 @@ class BrandOut(BaseModel):
     id: int
     name: str
     country: BrandCountry
-    # Optional: used by the UI for clickout handoff fallbacks
     logo_url: str | None = Field(default=None, alias="logoUrl")
 
     class Config:
@@ -65,17 +53,12 @@ class BrandMini(BaseModel):
         from_attributes = True
         allow_population_by_field_name = True
 
+
 class BrandLogoIn(BaseModel):
-    # Accepts {"logoUrl": "..."} from the UI
     logo_url: str | None = Field(default=None, alias="logoUrl")
 
     class Config:
         allow_population_by_field_name = True
-
-
-# ----------------------------
-# Products
-# ----------------------------
 
 
 class ImageAssetOut(BaseModel):
@@ -86,14 +69,6 @@ class ImageAssetOut(BaseModel):
 
 
 class ProductCardOut(BaseModel):
-    """UI-aligned product shape.
-
-    This matches the current Haroona/Aruona UI expectations:
-    - productImage is used in the sheet grid card
-    - logoImage is used for the logo handoff transition
-    """
-
-    # New canonical fields (camelCase to match UI)
     productId: str
     productName: str
     advertiserId: str | None = None
@@ -104,7 +79,6 @@ class ProductCardOut(BaseModel):
     productImage: ImageAssetOut | None = None
     logoImage: ImageAssetOut | None = None
 
-    # Back-compat fields (older UI)
     id: int | None = None
     name: str | None = None
     brand: BrandMini | None = None
@@ -112,7 +86,6 @@ class ProductCardOut(BaseModel):
     imageAlt: str | None = None
 
 
-# Kept for compatibility with older clients/tests.
 class ProductOut(BaseModel):
     id: int
     name: str
@@ -124,3 +97,52 @@ class ProductOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class CityOut(BaseModel):
+    id: int
+    slug: str
+    name: str
+    countryCode: str
+    countryName: str
+    latitude: float
+    longitude: float
+    markerColor: str | None = None
+    imageUrl: str | None = None
+    followers: int
+
+
+class FeedProductOut(BaseModel):
+    productId: str
+    productName: str
+    advertiserId: str | None = None
+    brandName: str | None = None
+    price: str | None = None
+    currency: str | None = None
+    affiliateUrl: str
+
+    productImage: ImageAssetOut | None = None
+    logoImage: ImageAssetOut | None = None
+
+    citySlug: str | None = None
+    cityName: str | None = None
+    countryCode: str | None = None
+    countryName: str | None = None
+
+    category: str | None = None
+    style: str | None = None
+    vibe: str | None = None
+    isBestSeller: bool = False
+
+
+class FeedResponse(BaseModel):
+    items: list[FeedProductOut]
+    total: int
+    selectedCity: str | None = None
+    mode: str
+
+
+class FeedFiltersOut(BaseModel):
+    categories: list[str]
+    styles: list[str]
+    vibes: list[str]
