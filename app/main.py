@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -9,15 +11,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.database import engine, get_db
-from app.models import Base
+from app.database import get_db
 from app.routers import auth, etl, health, countries, brands, products, dev, cities, feed
 from app.api.etl import router as etl_router
 from app.auth.dependencies import get_current_user
 from app.schemas import UserMeOut
 
+ENV = os.getenv("ENV", "development").lower()
 
-Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Haroona API")
 
@@ -28,24 +29,28 @@ app.add_middleware(
         "http://127.0.0.1:3000",
         "https://haroona.com",
         "https://www.haroona.com",
-        "https://haroona.com",
-        "https://www.haroona.com",
+        "https://aruona.com",
+        "https://www.aruona.com",
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# Public routes
 app.include_router(auth.router)
-app.include_router(etl.router)
-app.include_router(etl_router)
 app.include_router(health.router)
 app.include_router(countries.router)
 app.include_router(brands.router)
 app.include_router(products.router)
-app.include_router(dev.router)
 app.include_router(cities.router)
 app.include_router(feed.router)
+
+# Dev/admin-only routes
+if ENV != "production":
+    app.include_router(dev.router)
+    app.include_router(etl.router)
+    app.include_router(etl_router)
 
 
 @app.get("/me", response_model=UserMeOut)
@@ -72,3 +77,4 @@ def db_health(db: Session = Depends(get_db)):
 @app.get("/")
 def root():
     return {"message": "Haroona API"}
+
