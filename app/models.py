@@ -1,5 +1,6 @@
-from sqlalchemy import Column, Integer, String, ForeignKey, UniqueConstraint, Numeric, Boolean
+from sqlalchemy import Column, Integer, String, ForeignKey, UniqueConstraint, Numeric, Boolean, DateTime, Text
 from sqlalchemy.orm import relationship
+from sqlalchemy.sql import func
 from app.database import Base
 
 
@@ -111,3 +112,99 @@ class Product(Base):
 
     def __repr__(self):
         return f"<Product {self.name} ({self.source})>"
+    
+
+class AwinProductFeedRaw(Base):
+    __tablename__ = "awin_product_feed_raw"
+
+    id = Column(Integer, primary_key=True, index=True)
+    source_file = Column(String(255), nullable=False)
+
+    advertiser_id = Column(String(50), nullable=True, index=True)
+    advertiser_name = Column(String(255), nullable=True)
+    external_product_id = Column(String(100), nullable=False)
+
+    title = Column(String(500), nullable=False)
+    description = Column(Text, nullable=True)
+    brand = Column(String(255), nullable=True)
+    google_product_category = Column(String(500), nullable=True)
+    product_type = Column(String(500), nullable=True)
+    availability = Column(String(50), nullable=True, index=True)
+    condition = Column(String(50), nullable=True)
+
+    price_raw = Column(String(50), nullable=True)
+    sale_price_raw = Column(String(50), nullable=True)
+
+    link = Column(Text, nullable=True)
+    aw_deep_link = Column(Text, nullable=True)
+    image_link = Column(Text, nullable=True)
+    additional_image_link = Column(Text, nullable=True)
+
+    raw_payload = Column(Text, nullable=False)
+    imported_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint(
+            "source_file",
+            "external_product_id",
+            name="uq_awin_raw_source_file_external_product_id",
+        ),
+    )
+
+    def __repr__(self):
+        return f"<AwinProductFeedRaw {self.external_product_id} from {self.source_file}>"
+    
+
+class AwinProductNormalized(Base):
+    __tablename__ = "awin_product_normalized"
+
+    id = Column(Integer, primary_key=True, index=True)
+    raw_id = Column(
+        Integer,
+        ForeignKey("awin_product_feed_raw.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+
+    source = Column(String(50), nullable=False, default="awin")
+    external_product_id = Column(String(100), nullable=False)
+    advertiser_id = Column(String(50), nullable=True, index=True)
+    advertiser_name = Column(String(255), nullable=True)
+
+    title = Column(String(500), nullable=False)
+    description = Column(Text, nullable=True)
+    brand_name = Column(String(255), nullable=True)
+
+    price_amount = Column(Numeric(10, 2), nullable=True)
+    currency = Column(String(3), nullable=True)
+
+    affiliate_url = Column(Text, nullable=True)
+    merchant_url = Column(Text, nullable=True)
+    image_url = Column(Text, nullable=True)
+
+    availability = Column(String(50), nullable=True, index=True)
+    google_product_category = Column(String(500), nullable=True)
+    product_type = Column(String(500), nullable=True)
+    normalized_category = Column(String(80), nullable=True, index=True)
+
+    is_usable = Column(Boolean, nullable=False, default=False, index=True)
+    needs_review = Column(Boolean, nullable=False, default=True, index=True)
+    review_notes = Column(Text, nullable=True)
+
+    normalized_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "external_product_id",
+            "source",
+            name="uq_awin_normalized_external_source",
+        ),
+    )
+
+    def __repr__(self):
+        return f"<AwinProductNormalized {self.external_product_id} usable={self.is_usable}>"

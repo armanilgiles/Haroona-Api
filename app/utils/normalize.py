@@ -8,26 +8,29 @@ ALIASES = {
 }
 
 
-def normalize_brand(name: str) -> Tuple[str, str]:
-    """
-    Returns:
-      (normalized_brand_key, confidence)
-    confidence: exact | alias | fuzzy
-    """
+def normalize_brand(label: str):
+    value = (label or "").strip().lower()
 
-    if not name:
-        return "", "exact"
+    aliases = {
+        "mure + grand": "mure_and_grand",
+        "mure & grand": "mure_and_grand",
+        "mulberry + grand": "mulberry_and_grand",
+        "mulberry & grand": "mulberry_and_grand",
+        "patches + pins": "patches_and_pins",
+        "patches & pins": "patches_and_pins",
+        "dipped shop": "dipped_shop",
+        "urban expressions": "urban_expressions",
+        "shiraleah": "shiraleah",
+        "nike": "nike",
+        "adidas": "adidas",
+    }
 
-    original = name
+    if value in aliases:
+        return aliases[value], 1.0
 
-    value = name.lower().strip()
-    value = re.sub(r"[®™©]", "", value)
-    value = re.sub(r"[^a-z0-9\s]", "", value)
-    value = re.sub(r"\s+", " ", value)
-
-    # Alias match
-    if value in ALIASES:
-        return ALIASES[value], "alias"
-
-    # Exact match (fallback assumption)
-    return value, "exact"
+    fallback = (
+        value.replace("&", "and")
+        .replace("+", "and")
+        .replace(" ", "_")
+    )
+    return fallback, 0.6
