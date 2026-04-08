@@ -5,8 +5,8 @@ import sys
 from decimal import Decimal, InvalidOperation
 
 from app.database import SessionLocal
-from app.models import AwinProductFeedRaw, AwinProductNormalized
-
+from app.models import AwinProductFeedRaw, AwinProductNormalized, CatalogBrandControl
+from app.utils.normalize import normalize_brand
 
 def clean_text(value: str | None) -> str | None:
     if value is None:
@@ -109,6 +109,76 @@ def build_review_notes(
 
     return "; ".join(notes) or None
 
+def get_allowed_brand_control(
+    db,
+    source: str,
+    brand_name: str | None,
+) -> CatalogBrandControl | None:
+    if not brand_name:
+        return None
+
+    brand_key, _ = normalize_brand(brand_name)
+
+    return (
+        db.query(CatalogBrandControl)
+        .filter(CatalogBrandControl.source == source)
+        .filter(CatalogBrandControl.brand_key == brand_key)
+        .filter(CatalogBrandControl.is_allowed.is_(True))
+        .first()
+    )
+
+
+def decide_review_status(
+    *,
+    title: str | None,
+    availability_lc: str,
+    price_amount,
+    currency: str | None,
+    affiliate_url: str | None,
+    image_url: str | None,
+    brand_name: str | None,
+    normalized_category: str | None,
+    brand_control: CatalogBrandControl | None,
+) -> tuple[bool, bool, str, str | None]:
+    reject_reasons: list[str] = []
+    pending_reasons: list[str] = []
+
+    if not clean_text(title):
+        reject_reasons.append("missing title")
+
+    if availability_lc != "in_stock":
+        reject_reasons.append("not in stock")
+
+    if price_amount is None or not currency:
+        reject_reasons.append("unparseable price")
+
+    if not affiliate_url:
+        reject_reasons.append("missing affiliate url")
+
+    if not image_url:
+        reject_reasons.append("missing image")
+
+    if not brand_name:
+        reject_reasons.append("missing brand")
+
+    if not normalized_category:
+        pending_reasons.append("unknown category")
+
+    if brand_name and not brand_control:
+        pending_reasons.append("brand not allowlisted")
+
+    is_usable = len(reject_reasons) == 0
+
+    if reject_reasons:
+        notes = "; ".join(reject_reasons + pending_reasons) or None
+        return is_usable, False, "rejected", notes
+
+    if pending_reasons:
+        notes = "; ".join(pending_reasons) or None
+        return is_usable, True, "pending", notes
+
+    return True, False, "approved", None
+
 
 def normalize_awin_raw(limit: int | None = None) -> dict:
     db = SessionLocal()
@@ -159,19 +229,23 @@ def normalize_awin_raw(limit: int | None = None) -> dict:
                 ]
             )
 
-            review_notes = build_review_notes(
-                raw=raw,
-                price_amount=price_amount,
-                currency=currency,
-                normalized_category=normalized_category,
-                affiliate_url=affiliate_url,
-                image_url=image_url,
+                        brand_control = get_allowed_brand_control(
+                db=db,
+                source="awin",
+                brand_name=brand_name,
             )
 
-            needs_review = (not is_usable) or (normalized_category is None)
-            review_status = "pending"
-            if is_usable and not needs_review:
-                review_status = "approved"
+            is_usable, needs_review, review_status, review_notes = decide_review_status(
+                title=raw.title,
+                availability_lc=availability_lc,
+                price_amount=price_amount,
+                currency=currency,
+                affiliate_url=affiliate_url,
+                image_url=image_url,
+                brand_name=brand_name,
+                normalized_category=normalized_category,
+                brand_control=brand_control,
+            )
 
             record = AwinProductNormalized(
                 raw_id=raw.id,
