@@ -109,9 +109,19 @@ class Product(Base):
     __table_args__ = (
         UniqueConstraint("external_id", "source", name="uq_product_external_source"),
     )
+    
 
     def __repr__(self):
         return f"<Product {self.name} ({self.source})>"
+    normalized_row_id = Column(
+        Integer,
+        ForeignKey("awin_product_normalized.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    last_seen_at = Column(DateTime(timezone=True), nullable=True)
+    deactivated_at = Column(DateTime(timezone=True), nullable=True)
+    deactivation_reason = Column(Text, nullable=True)
     
 
 class AwinProductFeedRaw(Base):
@@ -190,7 +200,20 @@ class AwinProductNormalized(Base):
 
     is_usable = Column(Boolean, nullable=False, default=False, index=True)
     needs_review = Column(Boolean, nullable=False, default=True, index=True)
+
+    review_status = Column(String(20), nullable=False, default="pending", index=True)
+    reviewed_at = Column(DateTime(timezone=True), nullable=True)
+    reviewed_by = Column(String(255), nullable=True)
+    rejection_reason = Column(Text, nullable=True)
+
     review_notes = Column(Text, nullable=True)
+
+    promoted_at = Column(DateTime(timezone=True), nullable=True)
+    promoted_product_id = Column(
+        Integer,
+        ForeignKey("products.id", ondelete="SET NULL"),
+        nullable=True,
+    )
 
     normalized_at = Column(
         DateTime(timezone=True),
@@ -208,3 +231,21 @@ class AwinProductNormalized(Base):
 
     def __repr__(self):
         return f"<AwinProductNormalized {self.external_product_id} usable={self.is_usable}>"
+    
+class CatalogBrandControl(Base):
+    __tablename__ = "catalog_brand_controls"
+
+    id = Column(Integer, primary_key=True, index=True)
+    source = Column(String(50), nullable=False, index=True)
+    brand_key = Column(String(150), nullable=False, index=True)
+    display_name = Column(String(255), nullable=False)
+    origin_country_code = Column(String(2), nullable=False)
+    is_allowed = Column(Boolean, nullable=False, default=True)
+    notes = Column(Text, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("source", "brand_key", name="uq_catalog_brand_controls_source_key"),
+    )
+
+    def __repr__(self):
+        return f"<CatalogBrandControl {self.source}:{self.brand_key}>"

@@ -12,7 +12,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.routers import auth, etl, health, countries, brands, products, dev, cities, feed
+from app.routers import auth, etl, health, countries, brands, products, dev, cities, feed, catalog_admin
 from app.api.etl import router as etl_router
 from app.auth.dependencies import get_current_user
 from app.schemas import UserMeOut
@@ -51,6 +51,7 @@ if ENV != "production":
     app.include_router(dev.router)
     app.include_router(etl.router)
     app.include_router(etl_router)
+    app.include_router(catalog_admin.router)
 
 
 @app.get("/me", response_model=UserMeOut)

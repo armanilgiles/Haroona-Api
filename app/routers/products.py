@@ -91,7 +91,8 @@ def get_products(
     db: Session = Depends(get_db),
 ):
     # Join Brand -> Country so we can prioritize by country.
-    query = db.query(Product).join(Brand).join(Country)
+    query = (db.query(Product).join(Brand).join(Country).filter(Product.is_active.is_(True))
+)
 
     if brand_id:
         query = query.filter(Product.brand_id == brand_id)
