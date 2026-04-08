@@ -1,9 +1,16 @@
 from __future__ import annotations
 
 import sys
+from datetime import datetime, timezone
 
+from app.models import (
+    AwinProductNormalized,
+    CatalogBrandControl,
+    Country,
+    Brand,
+    Product,
+)
 from app.database import SessionLocal
-from app.models import AwinProductNormalized, Country, Brand, Product
 from app.data.brand_map import BRAND_MAP
 from app.utils.normalize import normalize_brand
 
@@ -23,7 +30,14 @@ COUNTRY_NAMES = {
     "NL": "Netherlands",
 }
 
-
+def get_brand_control(db, source: str, brand_key: str) -> CatalogBrandControl | None:
+    return (
+        db.query(CatalogBrandControl)
+        .filter(CatalogBrandControl.source == source)
+        .filter(CatalogBrandControl.brand_key == brand_key)
+        .filter(CatalogBrandControl.is_allowed.is_(True))
+        .first()
+    )
 def get_or_create_country(db, code: str) -> Country:
     country = db.query(Country).filter(Country.code == code).first()
     if country:
@@ -58,7 +72,7 @@ def get_or_create_brand(db, name: str, country_id: int) -> Brand:
     return brand
 
 
-def upsert_product(db, row: AwinProductNormalized, brand_id: int) -> str:
+def upsert_product(db, row: AwinProductNormalized, brand_id: int) -> tuple[Product, str]:
     product = (
         db.query(Product)
         .filter(Product.external_id == row.external_product_id)
@@ -69,6 +83,8 @@ def upsert_product(db, row: AwinProductNormalized, brand_id: int) -> str:
     affiliate_url = row.affiliate_url or row.merchant_url
     if not affiliate_url:
         raise ValueError(f"row {row.id} missing affiliate/merchant URL")
+
+    now = datetime.now(timezone.utc)
 
     if product:
         product.advertiser_id = row.advertiser_id
@@ -81,7 +97,11 @@ def upsert_product(db, row: AwinProductNormalized, brand_id: int) -> str:
         product.brand_id = brand_id
         product.category = row.normalized_category or product.category
         product.is_active = True
-        return "updated"
+        product.normalized_row_id = row.id
+        product.last_seen_at = now
+        product.deactivated_at = None
+        product.deactivation_reason = None
+        return product, "updated"
 
     product = Product(
         external_id=row.external_product_id,
@@ -100,9 +120,12 @@ def upsert_product(db, row: AwinProductNormalized, brand_id: int) -> str:
         vibe=None,
         is_best_seller=False,
         is_active=True,
+        normalized_row_id=row.id,
+        last_seen_at=now,
     )
     db.add(product)
-    return "created"
+    db.flush()
+    return product, "created"
 
 
 def promote_awin_normalized(limit: int | None = None) -> dict:
@@ -122,7 +145,7 @@ def promote_awin_normalized(limit: int | None = None) -> dict:
         query = (
             db.query(AwinProductNormalized)
             .filter(AwinProductNormalized.is_usable.is_(True))
-            .filter(AwinProductNormalized.needs_review.is_(False))
+            .filter(AwinProductNormalized.review_status == "approved")
             .order_by(AwinProductNormalized.id.asc())
         )
 
@@ -139,12 +162,12 @@ def promote_awin_normalized(limit: int | None = None) -> dict:
                     continue
 
                 brand_key, confidence = normalize_brand(brand_label)
-                brand_meta = BRAND_MAP.get(brand_key)
-                if not brand_meta:
+                brand_control = get_brand_control(db, row.source, brand_key)
+                if not brand_control:
                     counts["skipped_unmapped_brand"] += 1
                     continue
 
-                country_code = brand_meta.get("origin_country")
+                country_code = brand_control.origin_country_code
                 if not country_code:
                     counts["skipped_missing_country"] += 1
                     continue
@@ -154,8 +177,11 @@ def promote_awin_normalized(limit: int | None = None) -> dict:
                     continue
 
                 country = get_or_create_country(db, country_code)
-                brand = get_or_create_brand(db, brand_label, country.id)
-                result = upsert_product(db, row, brand.id)
+                brand = get_or_create_brand(db, brand_control.display_name, country.id)
+                product, result = upsert_product(db, row, brand.id)
+
+                row.promoted_at = datetime.now(timezone.utc)
+                row.promoted_product_id = product.id
 
                 db.commit()
                 counts[result] += 1

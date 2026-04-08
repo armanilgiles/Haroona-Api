@@ -168,6 +168,11 @@ def normalize_awin_raw(limit: int | None = None) -> dict:
                 image_url=image_url,
             )
 
+            needs_review = (not is_usable) or (normalized_category is None)
+            review_status = "pending"
+            if is_usable and not needs_review:
+                review_status = "approved"
+
             record = AwinProductNormalized(
                 raw_id=raw.id,
                 source="awin",
@@ -187,7 +192,8 @@ def normalize_awin_raw(limit: int | None = None) -> dict:
                 product_type=clean_text(raw.product_type),
                 normalized_category=normalized_category,
                 is_usable=is_usable,
-                needs_review=(not is_usable) or (normalized_category is None),
+                needs_review=needs_review,
+                review_status=review_status,
                 review_notes=review_notes,
             )
 
