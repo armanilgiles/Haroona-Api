@@ -29,14 +29,9 @@ app.add_middleware(
         "http://127.0.0.1:3000",
         "https://haroona.com",
         "https://www.haroona.com",
-        "https://aruona.com",
-        "https://www.aruona.com",
-        "https://haroona-web.vercel.app",  # prod frontend (vercel)
-        "https://api-dev.haroona.com",
-
+        "https://haroona-web.vercel.app",
     ],
-        allow_origin_regex=r"^https://haroona.*-bless727-9934s-projects\.vercel\.app$",
-
+    allow_origin_regex=r"^https://haroona.*-bless727-9934s-projects\.vercel\.app$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
