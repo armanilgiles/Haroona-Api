@@ -33,7 +33,7 @@ app.add_middleware(
         "https://www.aruona.com",
         "https://haroona-web.vercel.app",  # prod frontend (vercel)
         "https://api-dev.haroona.com",
-        "https://haroona-ic3zy3en0-bless727-9934s-projects.vercel.app",
+        "https://haroona-web-git-main-bless727-9934s-projects.vercel.app",
 
     ],
     allow_credentials=True,
