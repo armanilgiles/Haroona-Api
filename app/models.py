@@ -207,7 +207,7 @@ class AwinProductNormalized(Base):
     rejection_reason = Column(Text, nullable=True)
 
     review_notes = Column(Text, nullable=True)
-
+    haroona_style = Column(Text, nullable=True)
     promoted_at = Column(DateTime(timezone=True), nullable=True)
     promoted_product_id = Column(
         Integer,
@@ -228,7 +228,7 @@ class AwinProductNormalized(Base):
             name="uq_awin_normalized_external_source",
         ),
     )
-
+    
     def __repr__(self):
         return f"<AwinProductNormalized {self.external_product_id} usable={self.is_usable}>"
     

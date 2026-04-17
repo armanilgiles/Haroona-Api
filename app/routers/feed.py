@@ -5,6 +5,15 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import Product, Brand, City, Country
 from app.schemas import FeedFiltersOut, FeedProductOut, FeedResponse, ImageAssetOut
+from sqlalchemy import func
+import random
+from fastapi import APIRouter, Depends
+from sqlalchemy.orm import Session
+from sqlalchemy import func
+import random
+
+from app.database import get_db
+from app.models import AwinProductNormalized
 
 router = APIRouter(prefix="/feed", tags=["feed"])
 
@@ -32,12 +41,13 @@ def get_feed_products(
     db: Session = Depends(get_db),
 ):
     query = (
-        db.query(Product)
-        .join(Brand)
-        .outerjoin(City)
-        .outerjoin(Country, City.country_id == Country.id)
-        .filter(Product.is_active.is_(True))
+    db.query(Product)
+    .join(Brand)
+    .outerjoin(City)
+    .outerjoin(Country, City.country_id == Country.id)
     )
+
+    query = _apply_curated_catalog_gate(query)
 
     if brand_id:
         query = query.filter(Product.brand_id == brand_id)
@@ -121,26 +131,110 @@ def get_feed_products(
 
 @router.get("/filters", response_model=FeedFiltersOut)
 def get_feed_filters(db: Session = Depends(get_db)):
+    base = (
+        db.query(Product)
+        .filter(Product.is_active.is_(True))
+        .filter(Product.normalized_row_id.isnot(None))
+        .filter(Product.city_id.isnot(None))
+    )
+
     categories = [
         row[0]
-        for row in db.query(distinct(Product.category))
+        for row in base.with_entities(distinct(Product.category))
         .filter(Product.category.isnot(None))
         .order_by(Product.category.asc())
         .all()
     ]
     styles = [
         row[0]
-        for row in db.query(distinct(Product.style))
+        for row in base.with_entities(distinct(Product.style))
         .filter(Product.style.isnot(None))
         .order_by(Product.style.asc())
         .all()
     ]
     vibes = [
         row[0]
-        for row in db.query(distinct(Product.vibe))
+        for row in base.with_entities(distinct(Product.vibe))
         .filter(Product.vibe.isnot(None))
         .order_by(Product.vibe.asc())
         .all()
     ]
 
     return FeedFiltersOut(categories=categories, styles=styles, vibes=vibes)
+
+def _apply_curated_catalog_gate(query):
+    return (
+        query
+        .filter(Product.is_active.is_(True))
+        .filter(Product.normalized_row_id.isnot(None))
+    )
+
+
+
+
+
+def get_products_by_category(db, category, limit):
+    return (
+        db.query(AwinProductNormalized)
+        .filter(
+            AwinProductNormalized.normalized_category == category,
+            AwinProductNormalized.review_status == "approved",
+            AwinProductNormalized.availability == "in_stock",
+        )
+        .order_by(func.random())
+        .limit(limit)
+        .all()
+    )
+
+
+def get_other_products(db, exclude_categories, limit):
+    return (
+        db.query(AwinProductNormalized)
+        .filter(
+            ~AwinProductNormalized.normalized_category.in_(exclude_categories),
+            AwinProductNormalized.review_status == "approved",
+            AwinProductNormalized.availability == "in_stock",
+        )
+        .order_by(func.random())
+        .limit(limit)
+        .all()
+    )
+
+
+@router.get("/feed/products")
+def get_curated_feed(db: Session = Depends(get_db)):
+    tops = get_products_by_category(db, "tops", 5)
+    jewelry = get_products_by_category(db, "jewelry", 3)
+    eyewear = get_products_by_category(db, "eyewear", 2)
+    other = get_other_products(db, ["tops", "jewelry", "eyewear"], 2)
+
+    print("DEBUG →", len(tops), len(jewelry), len(eyewear), len(other))
+
+    feed = tops + jewelry + eyewear + other
+    random.shuffle(feed)
+
+    return {
+    "items": [serialize(p) for p in feed],
+    "total": len(feed),
+    "selectedCity": None,
+    "mode": "curated"
+    }
+
+def safe_get(products, fallback, needed):
+    if len(products) < needed:
+        extra = fallback[: needed - len(products)]
+        return products + extra
+    return products
+
+
+def serialize(product):
+    return {
+        "id": product.id,
+        "title": product.title,
+        "brand": product.brand_name,
+        "price": float(product.price_amount) if product.price_amount else None,
+        "imageUrl": product.image_url,
+        "affiliateUrl": product.affiliate_url,
+        "category": product.normalized_category,
+        "style": product.haroona_style,
+    }

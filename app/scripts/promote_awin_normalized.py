@@ -9,7 +9,9 @@ from app.models import (
     Country,
     Brand,
     Product,
+    City,
 )
+
 from app.database import SessionLocal
 from app.data.brand_map import BRAND_MAP
 from app.utils.normalize import normalize_brand
@@ -29,6 +31,12 @@ COUNTRY_NAMES = {
     "DK": "Denmark",
     "NL": "Netherlands",
 }
+BRAND_CITY_SLUGS = {
+    "mure_and_grand": "new-york",
+}
+
+def get_city_by_slug(db, slug: str) -> City | None:
+    return db.query(City).filter(City.slug == slug).first()
 
 def get_brand_control(db, source: str, brand_key: str) -> CatalogBrandControl | None:
     return (
@@ -72,19 +80,24 @@ def get_or_create_brand(db, name: str, country_id: int) -> Brand:
     return brand
 
 
-def upsert_product(db, row: AwinProductNormalized, brand_id: int) -> tuple[Product, str]:
-    product = (
-        db.query(Product)
-        .filter(Product.external_id == row.external_product_id)
-        .filter(Product.source == row.source)
-        .first()
-    )
-
+def upsert_product(
+    db,
+    row: AwinProductNormalized,
+    brand_id: int,
+    city_id: int | None = None,
+) -> tuple[Product, str]:
     affiliate_url = row.affiliate_url or row.merchant_url
     if not affiliate_url:
         raise ValueError(f"row {row.id} missing affiliate/merchant URL")
 
     now = datetime.now(timezone.utc)
+
+    product = (
+        db.query(Product)
+        .filter(Product.source == row.source)
+        .filter(Product.external_id == row.external_product_id)
+        .first()
+    )
 
     if product:
         product.advertiser_id = row.advertiser_id
@@ -101,6 +114,8 @@ def upsert_product(db, row: AwinProductNormalized, brand_id: int) -> tuple[Produ
         product.last_seen_at = now
         product.deactivated_at = None
         product.deactivation_reason = None
+        if city_id is not None:
+            product.city_id = city_id
         return product, "updated"
 
     product = Product(
@@ -114,7 +129,7 @@ def upsert_product(db, row: AwinProductNormalized, brand_id: int) -> tuple[Produ
         product_image_url=row.image_url,
         product_image_alt=row.title,
         brand_id=brand_id,
-        city_id=None,
+        city_id=city_id,
         category=row.normalized_category,
         style=None,
         vibe=None,
@@ -163,6 +178,12 @@ def promote_awin_normalized(limit: int | None = None) -> dict:
 
                 brand_key, confidence = normalize_brand(brand_label)
                 brand_control = get_brand_control(db, row.source, brand_key)
+                city_id = None
+                city_slug = BRAND_CITY_SLUGS.get(brand_key)
+                if city_slug:
+                    city = get_city_by_slug(db, city_slug)
+                    if city:
+                        city_id = city.id
                 if not brand_control:
                     counts["skipped_unmapped_brand"] += 1
                     continue
@@ -178,7 +199,7 @@ def promote_awin_normalized(limit: int | None = None) -> dict:
 
                 country = get_or_create_country(db, country_code)
                 brand = get_or_create_brand(db, brand_control.display_name, country.id)
-                product, result = upsert_product(db, row, brand.id)
+                product, result = upsert_product(db, row, brand.id, city_id=city_id)
 
                 row.promoted_at = datetime.now(timezone.utc)
                 row.promoted_product_id = product.id
