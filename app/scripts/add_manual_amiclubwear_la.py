@@ -18,6 +18,7 @@ SOURCE = "cj"
 SOURCE_FILE = "manual-cj-amiclubwear-la"
 ADVERTISER_ID = "11168474"
 BRAND_NAME = "AMiClubWear"
+BRAND_LOGO_URL = "https://amiclubwear.com/cdn/shop/files/amiclubwear_logo.jpg?v=1730305339"
 
 PRODUCTS = [
     {
@@ -125,14 +126,18 @@ def get_or_create_brand(db, country_id: int) -> Brand:
         .filter(Brand.country_id == country_id)
         .first()
     )
+
     if brand:
+        brand.logo_url = BRAND_LOGO_URL
+        db.flush()
         return brand
 
     brand = Brand(
         name=BRAND_NAME,
         country_id=country_id,
-        logo_url=None,
+        logo_url=BRAND_LOGO_URL,
     )
+
     db.add(brand)
     db.flush()
     return brand
