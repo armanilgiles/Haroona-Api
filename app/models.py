@@ -92,7 +92,7 @@ class Product(Base):
 
     product_image_url = Column(String(800), nullable=True)
     product_image_alt = Column(String(255), nullable=True)
-
+    video_url = Column(String(800), nullable=True)
     brand_id = Column(Integer, ForeignKey("brands.id"), nullable=False)
     city_id = Column(Integer, ForeignKey("cities.id"), nullable=True)
 
