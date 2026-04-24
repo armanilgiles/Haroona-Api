@@ -115,25 +115,22 @@ class CityOut(BaseModel):
 class FeedProductOut(BaseModel):
     productId: str
     productName: str
-    advertiserId: str | None = None
-    brandName: str | None = None
-    price: str | None = None
-    currency: str | None = None
-    affiliateUrl: str
+    advertiserId: str | None
+    brandName: str | None
+    price: str | None
+    currency: str | None
+    affiliateUrl: str | None
+    productImage: ImageAssetOut | None
+    logoImage: ImageAssetOut | None
 
-    productImage: ImageAssetOut | None = None
-    logoImage: ImageAssetOut | None = None
+    videoUrl: str | None = None  # 🔥 THIS FIXES EVERYTHING
 
-    citySlug: str | None = None
-    cityName: str | None = None
-    countryCode: str | None = None
-    countryName: str | None = None
-
-    category: str | None = None
-    style: str | None = None
-    vibe: str | None = None
-    isBestSeller: bool = False
-
+    citySlug: str | None
+    cityName: str | None
+    category: str | None
+    style: str | None
+    vibe: str | None
+    isBestSeller: bool | None
 
 class FeedResponse(BaseModel):
     items: list[FeedProductOut]
