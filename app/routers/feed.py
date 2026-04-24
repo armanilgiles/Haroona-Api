@@ -114,6 +114,8 @@ def get_feed_products(
                     if p.product_image_url
                     else None
                 ),
+                
+                videoUrl=p.video_url,
                 logoImage=(ImageAssetOut(url=logo_url, alt=logo_alt) if logo_url else None),
                 citySlug=city_obj.slug if city_obj else None,
                 cityName=city_obj.name if city_obj else None,
@@ -237,4 +239,5 @@ def serialize(product):
         "affiliateUrl": product.affiliate_url,
         "category": product.normalized_category,
         "style": product.haroona_style,
+        "video_url": product.video_url,
     }
