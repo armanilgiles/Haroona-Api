@@ -30,6 +30,7 @@ app.add_middleware(
         "https://haroona.com",
         "https://www.haroona.com",
         "https://haroona-web.vercel.app",
+        "http://192.168.1.202:3000"
     ],
     allow_origin_regex=r"^https://haroona.*-bless727-9934s-projects\.vercel\.app$",
     allow_credentials=True,

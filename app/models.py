@@ -89,7 +89,7 @@ class Product(Base):
     price = Column(Numeric(10, 2), nullable=True)
     currency = Column(String(3), nullable=False)
     affiliate_url = Column(String, nullable=False)
-
+    is_affiliate = Column(Boolean, default=False)
     product_image_url = Column(String(800), nullable=True)
     product_image_alt = Column(String(255), nullable=True)
     video_url = Column(String(800), nullable=True)
