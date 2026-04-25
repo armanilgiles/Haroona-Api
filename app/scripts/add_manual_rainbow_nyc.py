@@ -258,7 +258,7 @@ def upsert_product(db, item: dict, brand_id: int, city_id: int, normalized_row_i
     product.currency = "USD"
     product.affiliate_url = item["affiliate_url"]
     product.product_image_url = item["image_url"]
-    product.video_url = "https://www.rainbowshops.com/cdn/shop/videos/c/vp/d75316222d1146d8b56b7577ee9e763a/d75316222d1146d8b56b7577ee9e763a.HD-1080p-7.2Mbps-64589935.mp4?v=0"    
+    product.video_url = item.get("video_url")
     product.product_image_alt = item["name"]
     product.brand_id = brand_id
     product.city_id = city_id
