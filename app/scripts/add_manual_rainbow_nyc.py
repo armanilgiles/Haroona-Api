@@ -259,6 +259,7 @@ def upsert_product(db, item: dict, brand_id: int, city_id: int, normalized_row_i
     product.affiliate_url = item["affiliate_url"]
     product.product_image_url = item["image_url"]
     product.video_url = item.get("video_url")
+
     product.product_image_alt = item["name"]
     product.brand_id = brand_id
     product.city_id = city_id
