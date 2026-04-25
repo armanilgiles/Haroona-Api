@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from decimal import Decimal
-
+from app.utils.affiliate import is_affiliate
 from app.database import SessionLocal
 from app.models import (
     AwinProductFeedRaw,
@@ -13,6 +13,7 @@ from app.models import (
     Country,
     Product,
 )
+from app.utils.affiliate import is_affiliate
 
 # Using source='awin' keeps these manual inserts aligned with your Awin pipeline,
 # so future feed imports are less likely to create parallel duplicates.
@@ -272,6 +273,7 @@ def upsert_product(db, item: dict, brand_id: int, city_id: int, normalized_row_i
     product.price = item["price"]
     product.currency = "USD"
     product.affiliate_url = item["affiliate_url"]
+    product.is_affiliate = is_affiliate(item["affiliate_url"])
     product.product_image_url = item["image_url"]
     product.product_image_alt = item["name"]
     product.brand_id = brand_id

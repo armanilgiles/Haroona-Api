@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 from datetime import datetime, timezone
+from app.utils.affiliate import is_affiliate
 
 from app.models import (
     AwinProductNormalized,
@@ -80,15 +81,11 @@ def get_or_create_brand(db, name: str, country_id: int) -> Brand:
     return brand
 
 
-def upsert_product(
-    db,
-    row: AwinProductNormalized,
-    brand_id: int,
-    city_id: int | None = None,
-) -> tuple[Product, str]:
-    affiliate_url = row.affiliate_url or row.merchant_url
+def upsert_product(db, row, brand_id, city_id=None):
+    affiliate_url = row.affiliate_url
+
     if not affiliate_url:
-        raise ValueError(f"row {row.id} missing affiliate/merchant URL")
+        raise ValueError(f"row {row.id} Missing affiliate URL")
 
     now = datetime.now(timezone.utc)
 
@@ -99,12 +96,21 @@ def upsert_product(
         .first()
     )
 
+    is_aff = is_affiliate(affiliate_url)
+
     if product:
+        print(f"UPDATING product {product.id} → is_affiliate={is_aff}")
+
         product.advertiser_id = row.advertiser_id
         product.name = row.title or product.name
-        product.price = row.price_amount if row.price_amount is not None else product.price
-        product.currency = row.currency or product.currency or "USD"
+        product.price = row.price_amount or product.price
+        product.currency = row.currency or "USD"
         product.affiliate_url = affiliate_url
+
+        # 🔥 FORCE UPDATE
+        if product.is_affiliate != is_aff:
+            product.is_affiliate = is_aff
+
         product.product_image_url = row.image_url or product.product_image_url
         product.product_image_alt = row.title or product.product_image_alt
         product.brand_id = brand_id
@@ -112,12 +118,16 @@ def upsert_product(
         product.is_active = True
         product.normalized_row_id = row.id
         product.last_seen_at = now
-        product.deactivated_at = None
-        product.deactivation_reason = None
-        if city_id is not None:
+
+        if city_id:
             product.city_id = city_id
+
+        db.add(product)
+        db.commit()   # 🔥 FORCE COMMIT HERE
+
         return product, "updated"
 
+    # CREATE
     product = Product(
         external_id=row.external_product_id,
         source=row.source,
@@ -126,20 +136,20 @@ def upsert_product(
         price=row.price_amount,
         currency=row.currency or "USD",
         affiliate_url=affiliate_url,
+        is_affiliate=is_aff,
         product_image_url=row.image_url,
         product_image_alt=row.title,
         brand_id=brand_id,
         city_id=city_id,
         category=row.normalized_category,
-        style=None,
-        vibe=None,
-        is_best_seller=False,
         is_active=True,
         normalized_row_id=row.id,
         last_seen_at=now,
     )
+
     db.add(product)
-    db.flush()
+    db.commit()
+
     return product, "created"
 
 
