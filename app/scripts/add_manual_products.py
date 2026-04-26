@@ -8,6 +8,7 @@ from app.catalog.manual_seed_registry import SEEDS, get_manual_seed
 
 def print_available_seeds() -> None:
     print("Available manual product seeds:")
+
     for key, seed in SEEDS.items():
         print(f"- {key}: {seed.brand_name} / {seed.city_name} / {len(seed.products)} products")
 
@@ -17,6 +18,7 @@ def run_seed(seed_key: str) -> None:
     created_or_updated = seed_manual_products(seed)
 
     print(f"Added/updated {len(created_or_updated)} products for {seed.brand_name} / {seed.city_name}:")
+
     for name in created_or_updated:
         print(f"- {name}")
 

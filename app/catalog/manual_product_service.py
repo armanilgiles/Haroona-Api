@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping
 
 from sqlalchemy.orm import Session
 
+from app.catalog.manual_seed_types import ManualProductSeed
 from app.database import SessionLocal
 from app.models import (
     AwinProductFeedRaw,
@@ -18,31 +18,6 @@ from app.models import (
     Product,
 )
 from app.utils.affiliate import is_affiliate
-
-
-@dataclass(frozen=True)
-class ManualProductSeed:
-    key: str
-    source: str
-    source_file: str
-    advertiser_id: str
-    brand_name: str
-    brand_logo_url: str | None
-
-    country_code: str
-    country_name: str
-
-    city_slug: str
-    city_name: str
-    latitude: Decimal
-    longitude: Decimal
-    marker_color: str | None
-
-    review_notes: str | None
-    products: Sequence[Mapping[str, Any]]
-
-    currency: str = "USD"
-    default_availability: str = "in_stock"
 
 
 REQUIRED_PRODUCT_KEYS = (
@@ -62,13 +37,16 @@ REQUIRED_PRODUCT_KEYS = (
 def _to_decimal(value: Any) -> Decimal | None:
     if value is None:
         return None
+
     if isinstance(value, Decimal):
         return value
+
     return Decimal(str(value))
 
 
 def _validate_item(item: Mapping[str, Any]) -> None:
     missing = [key for key in REQUIRED_PRODUCT_KEYS if key not in item]
+
     if missing:
         external_id = item.get("external_id", "unknown")
         raise ValueError(f"Manual product {external_id} is missing keys: {missing}")
@@ -117,6 +95,7 @@ def get_or_create_city(
         image_url=None,
         followers=0,
     )
+
     db.add(city)
     db.flush()
     return city
@@ -137,6 +116,7 @@ def get_or_create_brand(
     if brand:
         if seed.brand_logo_url:
             brand.logo_url = seed.brand_logo_url
+
         db.flush()
         return brand
 
@@ -145,6 +125,7 @@ def get_or_create_brand(
         country_id=country_id,
         logo_url=seed.brand_logo_url,
     )
+
     db.add(brand)
     db.flush()
     return brand
