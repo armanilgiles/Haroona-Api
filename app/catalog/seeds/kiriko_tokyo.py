@@ -26,6 +26,58 @@ PRODUCTS = [{'external_id': 'kiriko-original-v-neck-tunic-sunflower-chijimi',
   'availability': 'out_of_stock',
   'is_active': True}]
 
+
+PRODUCTS += [
+    {
+        "external_id": "shijira-pants-indigo-small-grid",
+        "name": "ToK Pants, Chijimi Indigo with Small Grid",
+        "price": 68,
+        "affiliate_url": "https://kirikomade.com/products/shijira-pants-indigo-small-grid?ktk=MDFXc0RPLTA0ZTAyMWEwOTNh",
+        "merchant_url": "https://kirikomade.com/products/shijira-pants-indigo-small-grid",
+        "image_url": "https://kirikomade.com/cdn/shop/products/model_10_1_2048x.jpg?v=1684495207",
+        "category": "pants",
+        "style": "Tokyo heritage casual",
+        "vibe": "quiet artisan",
+        "is_best_seller": False,
+    },
+    {
+        "external_id": "kiriko-original-patched-lee-shirt-dress-cream",
+        "name": "Kiriko Custom Patched Lee Shirt Dress, Cream",
+        "price": 278,
+        "affiliate_url": "https://kirikomade.com/products/kiriko-original-patched-lee-shirt-dress-cream?ktk=MDFXc0RPLWZlMTBlZDM2MGJl",
+        "merchant_url": "https://kirikomade.com/products/kiriko-original-patched-lee-shirt-dress-cream",
+        "image_url": "https://kirikomade.com/cdn/shop/files/DYL_7248_2048x.png?v=1758911935",
+        "category": "dress",
+        "style": "Tokyo heritage casual",
+        "vibe": "quiet artisan",
+        "is_best_seller": False,
+    },
+    {
+        "external_id": "kiriko-original-pants-black-and-chartcoal-patched-wide-leg",
+        "name": "Kiriko Custom Pants, Black and Charcoal Patched, Wide Leg",
+        "price": 148,
+        "affiliate_url": "https://kirikomade.com/products/kiriko-original-pants-black-and-chartcoal-patched-wide-leg?ktk=MDFXc0RPLTlkNDFhYTQ3M2Q3",
+        "merchant_url": "https://kirikomade.com/products/kiriko-original-pants-black-and-chartcoal-patched-wide-leg",
+        "image_url": "https://kirikomade.com/cdn/shop/files/DYL_1998_a1af6f83-5a2a-407e-95a5-f49ae507798c_2048x.png?v=1760125343",
+        "category": "pants",
+        "style": "Tokyo heritage casual",
+        "vibe": "quiet artisan",
+        "is_best_seller": False,
+    },
+    {
+        "external_id": "oversized-a-line-pocket-dress-skinny-blue-weave-with-front-button",
+        "name": "ToK Pocket Dress, Oversized A-Line, Front Button, Chijimi, Grid",
+        "price": 95,
+        "affiliate_url": "https://kirikomade.com/products/oversized-a-line-pocket-dress-skinny-blue-weave-with-front-button?ktk=MDFXc0RPLTQ2ZTU4MTZiMjFm",
+        "merchant_url": "https://kirikomade.com/products/oversized-a-line-pocket-dress-skinny-blue-weave-with-front-button",
+        "image_url": "https://kirikomade.com/cdn/shop/products/model_1_1_9e3a5800-d91b-49ae-8544-c123077d2fbd_2048x.jpg?v=1684494230",
+        "category": "dress",
+        "style": "Tokyo heritage casual",
+        "vibe": "quiet artisan",
+        "is_best_seller": False,
+    },
+]
+
 SEED = ManualProductSeed(
     key='kiriko_tokyo',
     source=SOURCE,
