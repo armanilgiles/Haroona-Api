@@ -109,6 +109,8 @@ def get_feed_products(
                 price=_price_to_str(p.price),
                 currency=p.currency,
                 affiliateUrl=p.affiliate_url,
+                merchantUrl=p.merchant_url,
+                isAffiliate=p.is_affiliate,                
                 productImage=(
                     ImageAssetOut(url=p.product_image_url, alt=p.product_image_alt or p.name)
                     if p.product_image_url

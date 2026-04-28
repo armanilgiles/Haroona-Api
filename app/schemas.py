@@ -76,8 +76,11 @@ class ProductCardOut(BaseModel):
     price: str | None = None
     currency: str | None = None
     affiliateUrl: str
+    merchantUrl: str | None = None
+    isAffiliate: bool | None = None
     productImage: ImageAssetOut | None = None
     logoImage: ImageAssetOut | None = None
+
 
     id: int | None = None
     name: str | None = None
@@ -120,10 +123,12 @@ class FeedProductOut(BaseModel):
     price: str | None
     currency: str | None
     affiliateUrl: str | None
+    merchantUrl: str | None = None
+    isAffiliate: bool | None = None
     productImage: ImageAssetOut | None
     logoImage: ImageAssetOut | None
 
-    videoUrl: str | None = None  # 🔥 THIS FIXES EVERYTHING
+    videoUrl: str | None = None
 
     citySlug: str | None
     cityName: str | None

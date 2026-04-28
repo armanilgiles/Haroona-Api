@@ -280,8 +280,9 @@ def upsert_product(
     product.name = item["name"]
     product.price = _to_decimal(item.get("price"))
     product.currency = seed.currency
-    product.affiliate_url = item["affiliate_url"]
-    product.is_affiliate = is_affiliate(item["affiliate_url"])
+    product.affiliate_url = item.get("affiliate_url") or None
+    product.merchant_url = item.get("merchant_url") or None
+    product.is_affiliate = is_affiliate(item.get("affiliate_url") or "")
     product.product_image_url = item["image_url"]
     product.product_image_alt = item.get("image_alt") or item["name"]
     product.video_url = item.get("video_url")

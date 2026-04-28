@@ -82,10 +82,12 @@ def get_or_create_brand(db, name: str, country_id: int) -> Brand:
 
 
 def upsert_product(db, row, brand_id, city_id=None):
-    affiliate_url = row.affiliate_url
 
-    if not affiliate_url:
-        raise ValueError(f"row {row.id} Missing affiliate URL")
+    affiliate_url = row.affiliate_url or None
+    merchant_url = row.merchant_url or None
+
+    if not (affiliate_url or merchant_url):
+        raise ValueError(f"row {row.id} missing affiliate URL and merchant URL")
 
     now = datetime.now(timezone.utc)
 
@@ -106,6 +108,8 @@ def upsert_product(db, row, brand_id, city_id=None):
         product.price = row.price_amount or product.price
         product.currency = row.currency or "USD"
         product.affiliate_url = affiliate_url
+        product.merchant_url = item.get("merchant_url") or None
+        product.is_affiliate = is_affiliate(item.get("affiliate_url") or "")
 
         # 🔥 FORCE UPDATE
         if product.is_affiliate != is_aff:

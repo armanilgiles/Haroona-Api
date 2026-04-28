@@ -57,6 +57,8 @@ def _to_product_card(p: Product) -> ProductCardOut:
         price=_price_to_str(p.price),
         currency=p.currency,
         affiliateUrl=p.affiliate_url,
+        merchantUrl=p.merchant_url,
+        isAffiliate=p.is_affiliate,
         productImage=(
             ImageAssetOut(url=product_image_url, alt=product_image_alt)
             if product_image_url
