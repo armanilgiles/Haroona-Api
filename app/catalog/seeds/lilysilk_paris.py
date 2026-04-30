@@ -28,14 +28,17 @@ PRODUCTS = [
         "is_best_seller": True,
         "availability": "in_stock",
         "is_active": True,
+        "city_connection_type": "city_inspired_pick",
+        "city_connection_location": "Chosen for the Paris silk look",
+        "city_connection_note": "Selected because it captures the soft, minimal elegance associated with Paris style.",
     },
-        {
+    {
         "external_id": "lilysilk-elegant-alluring-cowl-neck-silk-dress",
         "sku": "N9452",
         "name": "Elegant Alluring Cowl Neck Silk Dress",
         "price": Decimal("83.00"),
         "regular_price": Decimal("280.00"),
-        "affiliate_url":None,
+        "affiliate_url": None,
         "merchant_url": "https://www.lilysilk.com/us/product/elegant-alluring-cowl-neck-silk-slip-dress.html",
         "image_url": "https://img.lilysilk.com/cdn-cgi/image/width=1800,height=2700,quality=80,fit=cover/media/catalog/product/N9452/252/1.jpg",
         "video_url": None,
@@ -45,6 +48,9 @@ PRODUCTS = [
         "is_best_seller": False,
         "availability": "in_stock",
         "is_active": True,
+        "city_connection_type": "city_inspired_pick",
+        "city_connection_location": "Chosen for the Paris evening look",
+        "city_connection_note": "Selected because the silk slip silhouette fits a quiet, polished Paris evening mood.",
     },
 ]
 

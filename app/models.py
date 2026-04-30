@@ -97,6 +97,7 @@ class Product(Base):
     brand_id = Column(Integer, ForeignKey("brands.id"), nullable=False)
     city_id = Column(Integer, ForeignKey("cities.id"), nullable=True)
 
+
     category = Column(String(80), nullable=True)
     style = Column(String(120), nullable=True)
     vibe = Column(String(120), nullable=True)
@@ -106,6 +107,9 @@ class Product(Base):
 
     brand = relationship("Brand", back_populates="products")
     city = relationship("City", back_populates="products")
+    city_connection_type = Column(String(40), nullable=True, index=True)
+    city_connection_location = Column(String(160), nullable=True)
+    city_connection_note = Column(String(255), nullable=True)
 
     __table_args__ = (
         UniqueConstraint("external_id", "source", name="uq_product_external_source"),

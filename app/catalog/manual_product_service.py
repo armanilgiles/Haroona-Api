@@ -31,7 +31,14 @@ REQUIRED_PRODUCT_KEYS = (
     "style",
     "vibe",
     "is_best_seller",
+    "city_connection_type",
 )
+
+ALLOWED_CITY_CONNECTION_TYPES = {
+    "local_boutique",
+    "city_based_brand",
+    "city_inspired_pick",
+}
 
 
 def _to_decimal(value: Any) -> Decimal | None:
@@ -50,6 +57,16 @@ def _validate_item(item: Mapping[str, Any]) -> None:
     if missing:
         external_id = item.get("external_id", "unknown")
         raise ValueError(f"Manual product {external_id} is missing keys: {missing}")
+
+    city_connection_type = item.get("city_connection_type")
+
+    if city_connection_type not in ALLOWED_CITY_CONNECTION_TYPES:
+        external_id = item.get("external_id", "unknown")
+        raise ValueError(
+            f"Manual product {external_id} has invalid city_connection_type: "
+            f"{city_connection_type}. Expected one of: "
+            f"{sorted(ALLOWED_CITY_CONNECTION_TYPES)}"
+        )
 
 
 def get_or_create_country(db: Session, seed: ManualProductSeed) -> Country:
@@ -151,15 +168,18 @@ def upsert_raw_row(
     )
 
     payload = {
-        "source": seed.source,
-        "merchant_url": item["merchant_url"],
-        "affiliate_url": item["affiliate_url"],
-        "regular_price": regular_price,
-        "sale_price": price,
-        "city_slug": seed.city_slug,
-        "manually_curated": True,
-        "availability": availability,
-        "video_url": item.get("video_url"),
+    "source": seed.source,
+    "merchant_url": item["merchant_url"],
+    "affiliate_url": item["affiliate_url"],
+    "regular_price": regular_price,
+    "sale_price": price,
+    "city_slug": seed.city_slug,
+    "manually_curated": True,
+    "availability": availability,
+    "video_url": item.get("video_url"),
+    "city_connection_type": item.get("city_connection_type"),
+    "city_connection_location": item.get("city_connection_location"),
+    "city_connection_note": item.get("city_connection_note"),
     }
 
     if not raw:
@@ -291,6 +311,11 @@ def upsert_product(
     product.category = item["category"]
     product.style = item["style"]
     product.vibe = item["vibe"]
+
+    product.city_connection_type = item["city_connection_type"]
+    product.city_connection_location = item.get("city_connection_location")
+    product.city_connection_note = item.get("city_connection_note")
+
     product.is_best_seller = bool(item.get("is_best_seller", False))
     product.is_active = bool(item.get("is_active", True))
     product.normalized_row_id = normalized_row_id

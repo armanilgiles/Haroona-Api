@@ -5,15 +5,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import Product, Brand, City, Country
 from app.schemas import FeedFiltersOut, FeedProductOut, FeedResponse, ImageAssetOut
-from sqlalchemy import func
-import random
-from fastapi import APIRouter, Depends
-from sqlalchemy.orm import Session
-from sqlalchemy import func
-import random
 
-from app.database import get_db
-from app.models import AwinProductNormalized
 
 router = APIRouter(prefix="/feed", tags=["feed"])
 
@@ -21,10 +13,19 @@ router = APIRouter(prefix="/feed", tags=["feed"])
 def _price_to_str(value) -> str | None:
     if value is None:
         return None
+
     try:
         return format(value, "f")
     except Exception:
         return str(value)
+
+
+def _apply_curated_catalog_gate(query):
+    return (
+        query
+        .filter(Product.is_active.is_(True))
+        .filter(Product.normalized_row_id.isnot(None))
+    )
 
 
 @router.get("/products", response_model=FeedResponse)
@@ -34,6 +35,10 @@ def get_feed_products(
     category: str | None = Query(None),
     style: str | None = Query(None),
     vibe: str | None = Query(None),
+    city_connection_type: str | None = Query(
+        None,
+        description="City connection type: local_boutique, city_based_brand, city_inspired_pick",
+    ),
     q: str | None = Query(None),
     brand_id: int | None = Query(None),
     limit: int = Query(24, ge=1, le=200),
@@ -41,10 +46,10 @@ def get_feed_products(
     db: Session = Depends(get_db),
 ):
     query = (
-    db.query(Product)
-    .join(Brand)
-    .outerjoin(City)
-    .outerjoin(Country, City.country_id == Country.id)
+        db.query(Product)
+        .join(Brand)
+        .outerjoin(City)
+        .outerjoin(Country, City.country_id == Country.id)
     )
 
     query = _apply_curated_catalog_gate(query)
@@ -61,6 +66,9 @@ def get_feed_products(
     if vibe:
         query = query.filter(Product.vibe == vibe)
 
+    if city_connection_type:
+        query = query.filter(Product.city_connection_type == city_connection_type)
+
     if q and q.strip():
         like = f"%{q.strip()}%"
         query = query.filter(
@@ -70,6 +78,9 @@ def get_feed_products(
                 Product.category.ilike(like),
                 Product.style.ilike(like),
                 Product.vibe.ilike(like),
+                Product.city_connection_type.ilike(like),
+                Product.city_connection_location.ilike(like),
+                Product.city_connection_note.ilike(like),
             )
         )
 
@@ -110,19 +121,28 @@ def get_feed_products(
                 currency=p.currency,
                 affiliateUrl=p.affiliate_url,
                 merchantUrl=p.merchant_url,
-                isAffiliate=p.is_affiliate,                
+                isAffiliate=p.is_affiliate,
                 productImage=(
-                    ImageAssetOut(url=p.product_image_url, alt=p.product_image_alt or p.name)
+                    ImageAssetOut(
+                        url=p.product_image_url,
+                        alt=p.product_image_alt or p.name,
+                    )
                     if p.product_image_url
                     else None
                 ),
-                
                 videoUrl=p.video_url,
-                logoImage=(ImageAssetOut(url=logo_url, alt=logo_alt) if logo_url else None),
+                logoImage=(
+                    ImageAssetOut(url=logo_url, alt=logo_alt)
+                    if logo_url
+                    else None
+                ),
+
+                cityConnectionType=p.city_connection_type,
+                cityConnectionLocation=p.city_connection_location,
+                cityConnectionNote=p.city_connection_note,
+
                 citySlug=city_obj.slug if city_obj else None,
                 cityName=city_obj.name if city_obj else None,
-                countryCode=country_obj.code if country_obj else None,
-                countryName=country_obj.name if country_obj else None,
                 category=p.category,
                 style=p.style,
                 vibe=p.vibe,
@@ -130,7 +150,12 @@ def get_feed_products(
             )
         )
 
-    return FeedResponse(items=items, total=total, selectedCity=city, mode=mode)
+    return FeedResponse(
+        items=items,
+        total=total,
+        selectedCity=city,
+        mode=mode,
+    )
 
 
 @router.get("/filters", response_model=FeedFiltersOut)
@@ -149,6 +174,7 @@ def get_feed_filters(db: Session = Depends(get_db)):
         .order_by(Product.category.asc())
         .all()
     ]
+
     styles = [
         row[0]
         for row in base.with_entities(distinct(Product.style))
@@ -156,6 +182,7 @@ def get_feed_filters(db: Session = Depends(get_db)):
         .order_by(Product.style.asc())
         .all()
     ]
+
     vibes = [
         row[0]
         for row in base.with_entities(distinct(Product.vibe))
@@ -164,82 +191,17 @@ def get_feed_filters(db: Session = Depends(get_db)):
         .all()
     ]
 
-    return FeedFiltersOut(categories=categories, styles=styles, vibes=vibes)
-
-def _apply_curated_catalog_gate(query):
-    return (
-        query
-        .filter(Product.is_active.is_(True))
-        .filter(Product.normalized_row_id.isnot(None))
-    )
-
-
-
-
-
-def get_products_by_category(db, category, limit):
-    return (
-        db.query(AwinProductNormalized)
-        .filter(
-            AwinProductNormalized.normalized_category == category,
-            AwinProductNormalized.review_status == "approved",
-            AwinProductNormalized.availability == "in_stock",
-        )
-        .order_by(func.random())
-        .limit(limit)
+    city_connection_types = [
+        row[0]
+        for row in base.with_entities(distinct(Product.city_connection_type))
+        .filter(Product.city_connection_type.isnot(None))
+        .order_by(Product.city_connection_type.asc())
         .all()
+    ]
+
+    return FeedFiltersOut(
+        categories=categories,
+        styles=styles,
+        vibes=vibes,
+        cityConnectionTypes=city_connection_types,
     )
-
-
-def get_other_products(db, exclude_categories, limit):
-    return (
-        db.query(AwinProductNormalized)
-        .filter(
-            ~AwinProductNormalized.normalized_category.in_(exclude_categories),
-            AwinProductNormalized.review_status == "approved",
-            AwinProductNormalized.availability == "in_stock",
-        )
-        .order_by(func.random())
-        .limit(limit)
-        .all()
-    )
-
-
-@router.get("/feed/products")
-def get_curated_feed(db: Session = Depends(get_db)):
-    tops = get_products_by_category(db, "tops", 5)
-    jewelry = get_products_by_category(db, "jewelry", 3)
-    eyewear = get_products_by_category(db, "eyewear", 2)
-    other = get_other_products(db, ["tops", "jewelry", "eyewear"], 2)
-
-    print("DEBUG →", len(tops), len(jewelry), len(eyewear), len(other))
-
-    feed = tops + jewelry + eyewear + other
-    random.shuffle(feed)
-
-    return {
-    "items": [serialize(p) for p in feed],
-    "total": len(feed),
-    "selectedCity": None,
-    "mode": "curated"
-    }
-
-def safe_get(products, fallback, needed):
-    if len(products) < needed:
-        extra = fallback[: needed - len(products)]
-        return products + extra
-    return products
-
-
-def serialize(product):
-    return {
-        "id": product.id,
-        "title": product.title,
-        "brand": product.brand_name,
-        "price": float(product.price_amount) if product.price_amount else None,
-        "imageUrl": product.image_url,
-        "affiliateUrl": product.affiliate_url,
-        "category": product.normalized_category,
-        "style": product.haroona_style,
-        "video_url": product.video_url,
-    }
