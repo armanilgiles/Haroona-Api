@@ -5,7 +5,7 @@ from sqlalchemy import case
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
-from app.models import Brand, Country, Product
+from app.models import Brand, City, Country, Product
 from app.schemas import BrandMini, ImageAssetOut, ProductCardOut
 from app.utils.brand_registry import lookup_logo_url
 from app.utils.normalize import normalize_brand
@@ -28,6 +28,11 @@ def _price_to_str(value) -> str | None:
         return format(value, "f")
     except Exception:
         return str(value)
+def _normalize_city_slug(value: str | None) -> str | None:
+    if not value:
+        return None
+
+    return value.strip().lower().replace(" ", "-")
 
 
 def _to_product_card(p: Product) -> ProductCardOut:
@@ -93,14 +98,23 @@ def get_products(
     db: Session = Depends(get_db),
 ):
     # Join Brand -> Country so we can prioritize by country.
-    query = ( db.query(Product)
+    query = (
+    db.query(Product)
     .join(Brand)
     .join(Country)
+    .outerjoin(City, Product.city_id == City.id)
     .filter(Product.is_active.is_(True))
     .filter(Product.normalized_row_id.isnot(None))
     .filter(Product.city_id.isnot(None))
-    )
+)
+    selected_city_slug = _normalize_city_slug(city)
 
+    if selected_city_slug:  
+        query = query.filter(City.slug == selected_city_slug)
+    city: str | None = Query(
+    None,
+    description="City slug or city name, e.g. new-york or New York.",
+    ),
     if brand_id:
         query = query.filter(Product.brand_id == brand_id)
 

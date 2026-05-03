@@ -11,7 +11,8 @@ def is_affiliate(url: str) -> bool:
         "rakuten.com",
         "tkqlhce.com",
         "jdoqocy.com",
-        "anrdoezrs.net"
+        "anrdoezrs.net",
+        "ktk"
     ]
 
     return any(domain in url for domain in affiliate_domains)
