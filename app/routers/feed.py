@@ -26,12 +26,17 @@ def _apply_curated_catalog_gate(query):
         .filter(Product.is_active.is_(True))
         .filter(Product.normalized_row_id.isnot(None))
     )
+def _normalize_city_slug(value: str | None) -> str | None:
+    if not value:
+        return None
+
+    return value.strip().lower().replace(" ", "-")
 
 
 @router.get("/products", response_model=FeedResponse)
 def get_feed_products(
     city: str | None = Query(None, description="City slug, e.g. tokyo"),
-    mode: str = Query("prioritize", pattern="^(prioritize|lock)$"),
+    mode: str = Query("lock", pattern="^(prioritize|lock)$"),    
     category: str | None = Query(None),
     style: str | None = Query(None),
     vibe: str | None = Query(None),
@@ -53,6 +58,11 @@ def get_feed_products(
     )
 
     query = _apply_curated_catalog_gate(query)
+
+    selected_city_slug = _normalize_city_slug(city)
+
+    if selected_city_slug:
+        query = query.filter(City.slug == selected_city_slug)
 
     if brand_id:
         query = query.filter(Product.brand_id == brand_id)
@@ -84,16 +94,9 @@ def get_feed_products(
             )
         )
 
-    if city and mode == "lock":
-        query = query.filter(City.slug == city)
-
     count_query = query
 
-    if city and mode == "prioritize":
-        priority = case((City.slug == city, 0), else_=1)
-        query = query.order_by(priority, Product.is_best_seller.desc(), Product.id.desc())
-    else:
-        query = query.order_by(Product.is_best_seller.desc(), Product.id.desc())
+    query = query.order_by(Product.is_best_seller.desc(), Product.id.desc())
 
     total = count_query.with_entities(func.count(Product.id)).scalar() or 0
     products = query.offset(offset).limit(limit).all()
