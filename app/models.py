@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, ForeignKey, UniqueConstraint, Numeric, Boolean, DateTime, Text
+from sqlalchemy import Column, Integer, BigInteger, String, ForeignKey, UniqueConstraint, Numeric, Boolean, DateTime, Text, JSON
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.database import Base
@@ -15,6 +15,36 @@ class User(Base):
 
     def __repr__(self):
         return f"<User {self.email}>"
+
+
+class AnalyticsEvent(Base):
+    __tablename__ = "analytics_events"
+
+    id = Column(BigInteger, primary_key=True, index=True, autoincrement=True)
+
+    # Examples: product_click, city_select, filter_change, handoff_start
+    event_name = Column(String(80), nullable=False, index=True)
+
+    # Frontend-generated IDs let us understand behavior without requiring login.
+    anonymous_id = Column(String(120), nullable=True, index=True)
+    session_id = Column(String(120), nullable=True, index=True)
+
+    # Optional links to Haroona data. product_id is the client-facing ID.
+    user_id = Column(String(64), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    product_id = Column(String(200), nullable=True, index=True)
+    db_product_id = Column(Integer, ForeignKey("products.id", ondelete="SET NULL"), nullable=True, index=True)
+    city_slug = Column(String(80), nullable=True, index=True)
+    city_name = Column(String(120), nullable=True)
+
+    path = Column(Text, nullable=True)
+    referrer = Column(Text, nullable=True)
+    user_agent = Column(String(500), nullable=True)
+
+    properties = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), index=True)
+
+    def __repr__(self):
+        return f"<AnalyticsEvent {self.event_name} #{self.id}>"
 
 
 class Country(Base):

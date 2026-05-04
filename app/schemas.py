@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from typing import Any
 
 from pydantic import BaseModel, HttpUrl, Field
 
@@ -153,3 +154,25 @@ class FeedFiltersOut(BaseModel):
     styles: list[str]
     vibes: list[str]
     cityConnectionTypes: list[str] = []
+
+
+
+class AnalyticsEventCreate(BaseModel):
+    eventName: str = Field(..., min_length=1, max_length=80)
+
+    anonymousId: str | None = Field(default=None, max_length=120)
+    sessionId: str | None = Field(default=None, max_length=120)
+
+    productId: str | None = Field(default=None, max_length=200)
+    dbProductId: int | None = None
+    citySlug: str | None = Field(default=None, max_length=80)
+    cityName: str | None = Field(default=None, max_length=120)
+
+    path: str | None = Field(default=None, max_length=1000)
+    referrer: str | None = Field(default=None, max_length=1000)
+    properties: dict[str, Any] = Field(default_factory=dict)
+
+
+class AnalyticsEventOut(BaseModel):
+    ok: bool = True
+    id: int
