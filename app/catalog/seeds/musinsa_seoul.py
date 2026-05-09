@@ -20,7 +20,7 @@ PRODUCTS = [   {
         "regular_price": Decimal("50.00"),
         "affiliate_url": None,
         "merchant_url": "https://global.musinsa.com/us/goods/6163113",
-        "image_url": "https://global.musinsa.com/us/goods/6163113",
+        "image_url": "/images/products/seoul/angela-knit-set.png",
         "category": "set",
         "style": "Seoul polished knit set",
         "vibe": "soft polished",
