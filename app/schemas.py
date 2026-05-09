@@ -146,6 +146,7 @@ class FeedResponse(BaseModel):
     items: list[FeedProductOut]
     total: int
     selectedCity: str | None = None
+    selectedCities: list[str] = Field(default_factory=list)
     mode: str
 
 
