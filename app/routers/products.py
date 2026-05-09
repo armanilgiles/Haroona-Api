@@ -1,7 +1,7 @@
 from typing import List
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import case
+from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
@@ -92,39 +92,44 @@ def get_products(
         min_length=2,
         max_length=2,
     ),
+    city: str | None = Query(
+        None,
+        description="City slug or city name, e.g. new-york or New York.",
+    ),
     brand_id: int | None = Query(None, description="Optional brand id filter."),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ):
-    # Join Brand -> Country so we can prioritize by country.
     query = (
-    db.query(Product)
-    .join(Brand)
-    .join(Country)
-    .outerjoin(City, Product.city_id == City.id)
-    .filter(Product.is_active.is_(True))
-    .filter(Product.normalized_row_id.isnot(None))
-    .filter(Product.city_id.isnot(None))
-)
+        db.query(Product)
+        .join(Brand)
+        .join(Country)
+        .outerjoin(City, Product.city_id == City.id)
+        .filter(Product.is_active.is_(True))
+        .filter(Product.normalized_row_id.isnot(None))
+        .filter(Product.city_id.isnot(None))
+    )
+
     selected_city_slug = _normalize_city_slug(city)
 
-    if selected_city_slug:  
+    if selected_city_slug:
         query = query.filter(City.slug == selected_city_slug)
-    city: str | None = Query(
-    None,
-    description="City slug or city name, e.g. new-york or New York.",
-    ),
+
     if brand_id:
         query = query.filter(Product.brand_id == brand_id)
 
-    # Prioritize matches first (not strict filtering).
+    shoes_last = case(
+        (func.lower(Product.category).in_(["shoe", "shoes", "sneaker", "sneakers", "footwear"]), 1),
+        else_=0,
+    )
+
     if country:
         c = country.upper()
         priority = case((Country.code == c, 0), else_=1)
-        query = query.order_by(priority, Product.id.desc())
+        query = query.order_by(priority, shoes_last.asc(), Product.id.desc())
     else:
-        query = query.order_by(Product.id.desc())
+        query = query.order_by(shoes_last.asc(), Product.id.desc())
 
     products = query.offset(offset).limit(limit).all()
     return [_to_product_card(p) for p in products]
