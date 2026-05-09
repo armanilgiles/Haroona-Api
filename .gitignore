@@ -2,10 +2,18 @@
 __pycache__/
 *.pyc
 *.pyo
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.pyd
 
 # Virtual env
 venv/
 .env
+_pydantic_core.cp311-win_amd64.pyd
+_psycopg.cp311-win_amd64.pyd
+python.exe
 
 # OS
 .DS_Store
