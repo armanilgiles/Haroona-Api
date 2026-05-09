@@ -96,7 +96,16 @@ def get_feed_products(
 
     count_query = query
 
-    query = query.order_by(Product.is_best_seller.desc(), Product.id.desc())
+    shoes_last = case(
+        (func.lower(Product.category).in_(["shoe", "shoes", "sneaker", "sneakers", "footwear"]), 1),
+        else_=0,
+    )
+
+    query = query.order_by(
+        shoes_last.asc(),
+        Product.is_best_seller.desc(),
+        Product.id.desc(),
+    )
 
     total = count_query.with_entities(func.count(Product.id)).scalar() or 0
     products = query.offset(offset).limit(limit).all()
