@@ -26,6 +26,8 @@ def _apply_curated_catalog_gate(query):
         .filter(Product.is_active.is_(True))
         .filter(Product.normalized_row_id.isnot(None))
     )
+
+
 def _normalize_city_slug(value: str | None) -> str | None:
     if not value:
         return None
@@ -33,10 +35,27 @@ def _normalize_city_slug(value: str | None) -> str | None:
     return value.strip().lower().replace(" ", "-")
 
 
+def _normalize_city_slugs(values: list[str] | None) -> list[str]:
+    slugs: list[str] = []
+
+    for raw_value in values or []:
+        for part in raw_value.split(","):
+            slug = _normalize_city_slug(part)
+
+            if slug and slug not in slugs:
+                slugs.append(slug)
+
+    return slugs
+
+
 @router.get("/products", response_model=FeedResponse)
 def get_feed_products(
-    city: str | None = Query(None, description="City slug, e.g. tokyo"),
-    mode: str = Query("lock", pattern="^(prioritize|lock)$"),    
+    city: str | None = Query(None, description="Single city slug, e.g. tokyo"),
+    cities: list[str] | None = Query(
+        None,
+        description="Multiple city slugs, e.g. ?cities=tokyo,seoul or ?cities=tokyo&cities=seoul",
+    ),
+    mode: str = Query("lock", pattern="^(prioritize|lock)$"),
     category: str | None = Query(None),
     style: str | None = Query(None),
     vibe: str | None = Query(None),
@@ -59,10 +78,14 @@ def get_feed_products(
 
     query = _apply_curated_catalog_gate(query)
 
+    selected_city_slugs = _normalize_city_slugs(cities)
     selected_city_slug = _normalize_city_slug(city)
 
-    if selected_city_slug:
-        query = query.filter(City.slug == selected_city_slug)
+    if selected_city_slug and selected_city_slug not in selected_city_slugs:
+        selected_city_slugs.insert(0, selected_city_slug)
+
+    if selected_city_slugs:
+        query = query.filter(City.slug.in_(selected_city_slugs))
 
     if brand_id:
         query = query.filter(Product.brand_id == brand_id)
@@ -166,6 +189,7 @@ def get_feed_products(
         items=items,
         total=total,
         selectedCity=city,
+        selectedCities=selected_city_slugs,
         mode=mode,
     )
 

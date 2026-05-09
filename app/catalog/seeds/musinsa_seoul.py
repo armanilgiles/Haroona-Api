@@ -1,0 +1,112 @@
+from __future__ import annotations
+
+from decimal import Decimal
+
+from app.catalog.manual_seed_types import ManualProductSeed
+
+
+SOURCE = "manual"
+SOURCE_FILE = "manual-musinsa-standard-woman-seoul"
+ADVERTISER_ID = "musinsa-global"
+BRAND_NAME = "MUSINSA STANDARD WOMAN"
+BRAND_LOGO_URL = None
+
+PRODUCTS = [   {
+        "external_id": "musinsa-6163113-maisonlehar-angela-knit-set",
+        "sku": "6163113",
+        "name": "Angela Knit SET (Cardigan + Dress) 3 colors",
+        "description": "A coordinated cardigan-and-dress knit set from MAISONLEHAR with a polished, feminine Seoul-ready mood.",
+        "price": Decimal("50.00"),
+        "regular_price": Decimal("50.00"),
+        "affiliate_url": None,
+        "merchant_url": "https://global.musinsa.com/us/goods/6163113",
+        "image_url": "https://global.musinsa.com/us/goods/6163113",
+        "category": "set",
+        "style": "Seoul polished knit set",
+        "vibe": "soft polished",
+        "is_best_seller": False,
+        "availability": "in_stock",
+        "is_active": True,
+        "city_connection_type": "city_inspired_pick",
+        "city_connection_location": "Seoul · City-inspired pick",
+        "city_connection_note": "Selected as a polished cardigan-and-dress set with a soft K-fashion mood for Seoul-inspired discovery.",
+    },
+    {
+        "external_id": "musinsa-4661065-cotton-jacquard-puff-sleeve-blouse-rose-water",
+        "sku": "MWEBS5Z06-RT",
+        "name": "Women's Cotton Jacquard Puff Sleeve Blouse [Rose Water]",
+        "description": "A soft cotton jacquard blouse with feminine puff sleeves and a clean button-front silhouette.",
+        "price": Decimal("21.00"),
+        "regular_price": Decimal("21.00"),
+        "affiliate_url": None,
+        "merchant_url": "https://global.musinsa.com/us/goods/4661065",
+        "image_url": "https://thumbnail.coupangcdn.com/thumbnails/remote/492x492ex/image/vendor_inventory/982d/55e8b599b5b8049f273e4481ca6a7c9827e68b94fcb1087a762f6849f7ab.jpg",
+        "category": "tops",
+        "style": "Seoul soft blouse",
+        "vibe": "soft feminine",
+        "is_best_seller": False,
+        "availability": "in_stock",
+        "is_active": True,
+        "city_connection_type": "city_inspired_pick",
+        "city_connection_location": "Seoul · City-inspired pick",
+        "city_connection_note": "Selected for its soft, feminine blouse silhouette and clean K-fashion styling fit for Seoul-inspired discovery.",
+    },
+    {
+        "external_id": "musinsa-4651435-ribbed-slim-scoop-neck-cardigan-white",
+        "sku": "MWETL3Z02-WH",
+        "name": "Women's Ribbed Slim Scoop Neck Jersey Cardigan [White]",
+        "description": "A slim white ribbed jersey cardigan with a scoop neckline and minimal button-front styling.",
+        "price": Decimal("23.00"),
+        "regular_price": Decimal("23.00"),
+        "affiliate_url": None,
+        "merchant_url": "https://global.musinsa.com/us/goods/4651435",
+        "image_url": "https://thumbnail.coupangcdn.com/thumbnails/remote/492x492ex/image/vendor_inventory/7c64/c58826163bbb283330e462dd611bc1653f1f0d17e57802db235af924d4b8.jpg",
+        "category": "tops",
+        "style": "Seoul minimal layering",
+        "vibe": "clean everyday",
+        "is_best_seller": False,
+        "availability": "in_stock",
+        "is_active": True,
+        "city_connection_type": "city_inspired_pick",
+        "city_connection_location": "Seoul · City-inspired pick",
+        "city_connection_note": "Selected for its clean ribbed cardigan shape and minimal K-fashion layering feel.",
+    },
+    {
+        "external_id": "musinsa-4210257-cp-maxi-skirt-beige",
+        "sku": "MWDSK3Z02-BE",
+        "name": "Women's CP Maxi Skirt [Beige]",
+        "description": "A beige ankle-length CP maxi skirt with a clean, understated city silhouette.",
+        "price": Decimal("27.00"),
+        "regular_price": Decimal("27.00"),
+        "affiliate_url": None,
+        "merchant_url": "https://global.musinsa.com/us/goods/4210257",
+        "image_url": "https://thumbnail.coupangcdn.com/thumbnails/remote/492x492ex/image/vendor_inventory/b5e7/326c9aa6c1e30a45f2e4d6b8b8e2b15155f67a5ab7ebec980bb4e1e45105.jpg",
+        "category": "skirt",
+        "style": "Seoul relaxed silhouette",
+        "vibe": "minimal neutral",
+        "is_best_seller": False,
+        "availability": "in_stock",
+        "is_active": True,
+        "city_connection_type": "city_inspired_pick",
+        "city_connection_location": "Seoul · City-inspired pick",
+        "city_connection_note": "Selected for its relaxed neutral maxi silhouette and understated Seoul-inspired styling potential.",
+    },
+]
+
+SEED = ManualProductSeed(
+    key="musinsa_standard_woman_seoul",
+    source=SOURCE,
+    source_file=SOURCE_FILE,
+    advertiser_id=ADVERTISER_ID,
+    brand_name=BRAND_NAME,
+    brand_logo_url=BRAND_LOGO_URL,
+    country_code="KR",
+    country_name="South Korea",
+    city_slug="seoul",
+    city_name="Seoul",
+    latitude=Decimal("37.566535"),
+    longitude=Decimal("126.977969"),
+    marker_color="#7C3AED",
+    review_notes="Manually curated non-affiliate MUSINSA STANDARD WOMAN Seoul-inspired products for catalog volume.",
+    products=PRODUCTS,
+)
