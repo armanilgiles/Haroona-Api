@@ -12,6 +12,8 @@ def is_affiliate(url: str) -> bool:
         "tkqlhce.com",
         "jdoqocy.com",
         "anrdoezrs.net",
+        "sovrn.co",
+        "viglink.com",
         "ktk"
     ]
 
