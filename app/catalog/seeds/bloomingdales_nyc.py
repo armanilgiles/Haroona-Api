@@ -1,0 +1,117 @@
+from __future__ import annotations
+
+from decimal import Decimal
+
+from app.catalog.manual_seed_types import ManualProductSeed
+
+
+SOURCE = "manual"
+SOURCE_FILE = "manual-bloomingdales-nyc"
+ADVERTISER_ID = "bloomingdales"
+BRAND_NAME = "Bloomingdale's"
+BRAND_LOGO_URL = None
+
+PRODUCTS = [
+    {
+        "external_id": "bloomingdales-5739093-good-american-off-shoulder-poplin-bodysuit-white",
+        "sku": "5739093",
+        "name": "Good American Off Shoulder Poplin Bodysuit",
+        "description": "A white off-shoulder poplin bodysuit selected for casual New York day-to-night styling.",
+        "price": Decimal("96.60"),
+        "regular_price": Decimal("138.00"),
+        "affiliate_url": "",
+        "merchant_url": "https://www.bloomingdales.com/shop/product/good-american-off-shoulder-poplin-bodysuit?ID=5739093",
+        "image_url": "https://images.bloomingdalesassets.com/is/image/BLM/products/6/optimized/15355666_fpx.tif?bgc=255,255,255&wid=1200&qlt=90,0&fmt=jpeg",
+        "image_alt": "Good American Off Shoulder Poplin Bodysuit in white.",
+        "category": "tops",
+        "style": "NYC casual off-shoulder top",
+        "vibe": "casual feminine",
+        "is_best_seller": False,
+        "availability": "in_stock",
+        "is_active": True,
+        "city_connection_type": "city_inspired_pick",
+        "city_connection_location": "New York · casual city edit",
+        "city_connection_note": "Selected because the off-shoulder poplin shape feels casual, feminine, and easy to pair with denim or cargo pants for a New York day-to-night look.",
+    },
+    {
+        "external_id": "bloomingdales-5229447-aqua-drawstring-hem-cargo-pants-black",
+        "sku": "5229447",
+        "name": "AQUA Drawstring Hem Cargo Pants - Exclusive",
+        "description": "Black cargo pants selected as a casual New York bottom with relaxed street-style energy.",
+        "price": Decimal("52.80"),
+        "regular_price": Decimal("88.00"),
+        "affiliate_url": "",
+        "merchant_url": "https://www.bloomingdales.com/shop/product/aqua-drawstring-hem-cargo-pants-exclusive?ID=5229447",
+        "image_url": "https://images.bloomingdalesassets.com/is/image/BLM/products/5/optimized/13066445_fpx.tif?bgc=255,255,255&wid=1200&qlt=90,0&fmt=jpeg",
+        "image_alt": "AQUA Drawstring Hem Cargo Pants in black.",
+        "category": "bottoms",
+        "style": "NYC casual cargo pants",
+        "vibe": "relaxed street",
+        "is_best_seller": False,
+        "availability": "in_stock",
+        "is_active": True,
+        "city_connection_type": "city_inspired_pick",
+        "city_connection_location": "New York · casual street edit",
+        "city_connection_note": "Selected because the cargo-pocket shape, black color, and drawcord hem give this bottom a relaxed city-street feel that pairs cleanly with fitted tops and bodysuits.",
+    },
+    {
+        "external_id": "bloomingdales-5955058-theory-shoulder-draped-midi-dress-ivory",
+        "sku": "5955058",
+        "name": "Theory Shoulder Draped Midi Dress",
+        "description": "An ivory sleeveless midi dress selected for minimal, refined New York gallery-to-dinner styling.",
+        "price": Decimal("110.60"),
+        "regular_price": Decimal("395.00"),
+        "affiliate_url": "",
+        "merchant_url": "https://www.bloomingdales.com/shop/product/theory-shoulder-draped-midi-dress?ID=5955058",
+        "image_url": "https://images.bloomingdalesassets.com/is/image/BLM/products/7/optimized/14644647_fpx.tif?bgc=255,255,255&wid=1200&qlt=90,0&fmt=jpeg",
+        "image_alt": "Theory Shoulder Draped Midi Dress in ivory.",
+        "category": "dress",
+        "style": "NYC minimalist dress",
+        "vibe": "quiet luxury",
+        "is_best_seller": False,
+        "availability": "in_stock",
+        "is_active": True,
+        "city_connection_type": "city_inspired_pick",
+        "city_connection_location": "New York · minimalist city dress",
+        "city_connection_note": "Selected for its clean ivory silhouette and quiet-luxury feel that works for a refined New York evening look.",
+    },
+    {
+        "external_id": "bloomingdales-6069712-mestiza-new-york-kinsley-printed-drop-waist-midi-dress",
+        "sku": "6069712",
+        "name": "Mestiza New York Kinsley Printed Drop Waist Midi Dress",
+        "description": "A printed midi dress selected as a polished New York occasion piece with a brighter editorial mood.",
+        "price": Decimal("525.00"),
+        "regular_price": Decimal("525.00"),
+        "affiliate_url": "",
+        "merchant_url": "https://www.bloomingdales.com/shop/product/mestiza-new-york-kinsley-printed-drop-waist-midi-dress?ID=6069712",
+        "image_url": "https://images.bloomingdalesassets.com/is/image/BLM/products/1/optimized/15980051_fpx.tif?bgc=255,255,255&wid=1200&qlt=90,0&fmt=jpeg",
+        "image_alt": "Mestiza New York Kinsley Printed Drop Waist Midi Dress.",
+        "category": "dress",
+        "style": "NYC occasion dress",
+        "vibe": "editorial feminine",
+        "is_best_seller": False,
+        "availability": "in_stock",
+        "is_active": True,
+        "city_connection_type": "city_inspired_pick",
+        "city_connection_location": "New York · polished occasion edit",
+        "city_connection_note": "Selected as a New York occasion-style pick: structured, polished, and more editorial than casual basics.",
+    },
+]
+
+SEED = ManualProductSeed(
+    key="bloomingdales_nyc",
+    source=SOURCE,
+    source_file=SOURCE_FILE,
+    advertiser_id=ADVERTISER_ID,
+    brand_name=BRAND_NAME,
+    brand_logo_url=BRAND_LOGO_URL,
+    country_code="US",
+    country_name="United States",
+    city_slug="new-york",
+    city_name="New York",
+    latitude=Decimal("40.712776"),
+    longitude=Decimal("-74.005974"),
+    marker_color="#1D3557",
+    review_notes="Temporary non-affiliate Bloomingdale's NYC volume picks. Replace merchant URLs with approved affiliate links before scaling.",
+    products=PRODUCTS,
+)
