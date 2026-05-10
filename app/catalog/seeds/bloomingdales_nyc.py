@@ -1,0 +1,117 @@
+from __future__ import annotations
+
+from decimal import Decimal
+
+from app.catalog.manual_seed_types import ManualProductSeed
+
+
+SOURCE = "manual"
+SOURCE_FILE = "manual-bloomingdales-nyc"
+ADVERTISER_ID = "bloomingdales"
+BRAND_NAME = "Bloomingdale's"
+BRAND_LOGO_URL = None
+
+PRODUCTS = [
+    {
+        "external_id": "bloomingdales-5624184-donna-karan-essentials-double-breasted-blazer-black",
+        "sku": "5624184",
+        "name": "Donna Karan Essentials Double Breasted Blazer",
+        "description": "A sharp black double-breasted blazer selected for polished New York office-to-evening styling.",
+        "price": Decimal("81.12"),
+        "regular_price": Decimal("169.00"),
+        "affiliate_url": "",
+        "merchant_url": "https://www.bloomingdales.com/shop/product/donna-karan-essentials-double-breasted-blazer?ID=5624184",
+        "image_url": "https://images.bloomingdalesassets.com/is/image/BLM/products/2/optimized/14807912_fpx.tif?bgc=255,255,255&wid=1200&qlt=90,0&fmt=jpeg",
+        "image_alt": "Donna Karan Essentials Double Breasted Blazer in black.",
+        "category": "tops",
+        "style": "NYC tailored blazer",
+        "vibe": "polished city",
+        "is_best_seller": True,
+        "availability": "in_stock",
+        "is_active": True,
+        "city_connection_type": "city_inspired_pick",
+        "city_connection_location": "New York · polished city edit",
+        "city_connection_note": "Selected for its sharp black tailoring and office-to-evening energy that fits a polished New York look.",
+    },
+    {
+        "external_id": "bloomingdales-5866565-reiss-kaia-trousers-white",
+        "sku": "5866565",
+        "name": "REISS Kaia Trousers",
+        "description": "Wide-leg white trousers selected for a clean, elevated New York day-to-dinner outfit.",
+        "price": Decimal("275.00"),
+        "regular_price": Decimal("275.00"),
+        "affiliate_url": "",
+        "merchant_url": "https://www.bloomingdales.com/shop/product/reiss-kaia-trousers?ID=5866565",
+        "image_url": "https://images.bloomingdalesassets.com/is/image/BLM/products/6/optimized/15989096_fpx.tif?bgc=255,255,255&wid=1200&qlt=90,0&fmt=jpeg",
+        "image_alt": "REISS Kaia wide-leg trousers in white.",
+        "category": "bottoms",
+        "style": "NYC wide-leg trouser",
+        "vibe": "clean elevated",
+        "is_best_seller": False,
+        "availability": "in_stock",
+        "is_active": True,
+        "city_connection_type": "city_inspired_pick",
+        "city_connection_location": "New York · clean city tailoring",
+        "city_connection_note": "Selected because the wide-leg shape and crisp white finish feel refined, modern, and easy to style for New York city days.",
+    },
+    {
+        "external_id": "bloomingdales-5955058-theory-shoulder-draped-midi-dress-ivory",
+        "sku": "5955058",
+        "name": "Theory Shoulder Draped Midi Dress",
+        "description": "An ivory sleeveless midi dress selected for minimal, refined New York gallery-to-dinner styling.",
+        "price": Decimal("110.60"),
+        "regular_price": Decimal("395.00"),
+        "affiliate_url": "",
+        "merchant_url": "https://www.bloomingdales.com/shop/product/theory-shoulder-draped-midi-dress?ID=5955058",
+        "image_url": "https://images.bloomingdalesassets.com/is/image/BLM/products/7/optimized/14644647_fpx.tif?bgc=255,255,255&wid=1200&qlt=90,0&fmt=jpeg",
+        "image_alt": "Theory Shoulder Draped Midi Dress in ivory.",
+        "category": "dress",
+        "style": "NYC minimalist dress",
+        "vibe": "quiet luxury",
+        "is_best_seller": False,
+        "availability": "in_stock",
+        "is_active": True,
+        "city_connection_type": "city_inspired_pick",
+        "city_connection_location": "New York · minimalist city dress",
+        "city_connection_note": "Selected for its clean ivory silhouette and quiet-luxury feel that works for a refined New York evening look.",
+    },
+    {
+        "external_id": "bloomingdales-6069712-mestiza-new-york-kinsley-printed-drop-waist-midi-dress",
+        "sku": "6069712",
+        "name": "Mestiza New York Kinsley Printed Drop Waist Midi Dress",
+        "description": "A printed midi dress selected as a polished New York occasion piece with a brighter editorial mood.",
+        "price": Decimal("525.00"),
+        "regular_price": Decimal("525.00"),
+        "affiliate_url": "",
+        "merchant_url": "https://www.bloomingdales.com/shop/product/mestiza-new-york-kinsley-printed-drop-waist-midi-dress?ID=6069712",
+        "image_url": "https://images.bloomingdalesassets.com/is/image/BLM/products/1/optimized/15980051_fpx.tif?bgc=255,255,255&wid=1200&qlt=90,0&fmt=jpeg",
+        "image_alt": "Mestiza New York Kinsley Printed Drop Waist Midi Dress.",
+        "category": "dress",
+        "style": "NYC occasion dress",
+        "vibe": "editorial feminine",
+        "is_best_seller": False,
+        "availability": "in_stock",
+        "is_active": True,
+        "city_connection_type": "city_inspired_pick",
+        "city_connection_location": "New York · polished occasion edit",
+        "city_connection_note": "Selected as a New York occasion-style pick: structured, polished, and more editorial than casual basics.",
+    },
+]
+
+SEED = ManualProductSeed(
+    key="bloomingdales_nyc",
+    source=SOURCE,
+    source_file=SOURCE_FILE,
+    advertiser_id=ADVERTISER_ID,
+    brand_name=BRAND_NAME,
+    brand_logo_url=BRAND_LOGO_URL,
+    country_code="US",
+    country_name="United States",
+    city_slug="new-york",
+    city_name="New York",
+    latitude=Decimal("40.712776"),
+    longitude=Decimal("-74.005974"),
+    marker_color="#1D3557",
+    review_notes="Temporary non-affiliate Bloomingdale's NYC volume picks. Replace merchant URLs with approved affiliate links before scaling.",
+    products=PRODUCTS,
+)
