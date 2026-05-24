@@ -37,7 +37,7 @@ PRODUCTS = [
     "name": "Sadie Tiered Skort Set",
     "price": Decimal("82.00"),
     "regular_price": Decimal("82.00"),
-    "affiliate_url": "https://www.awin1.com/cread.php?awinmid=90981&awinaffid=2843918&clickref=haroona_ny_sadietieredskortset_card&ued=https%3A%2F%2Fmureandgrand.com%2Fproducts%2Fsadie-tiered-skort-set%3Fvariant%3D53999563407644",
+    "affiliate_url": "https://www.awin1.com/cread.php?awinmid=90981&awinaffid=2843918&clickref=sadie-tiered-skort-setMed&ued=https%3A%2F%2Fmureandgrand.com%2Fproducts%2Fsadie-tiered-skort-set%3Fvariant%3D53999563473180",
     "merchant_url": "https://mureandgrand.com/products/sadie-tiered-skort-set?variant=53999563407644",
     "image_url": "https://mureandgrand.com/cdn/shop/files/sadie-tiered-skort-set-clothing-mure-grand-mg-pink-xs-565064.jpg?v=1776478748&width=1946",
     "category": "set",
