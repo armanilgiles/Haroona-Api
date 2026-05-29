@@ -147,6 +147,7 @@ class FeedResponse(BaseModel):
     total: int
     selectedCity: str | None = None
     selectedCities: list[str] = Field(default_factory=list)
+    selectedCategories: list[str] = Field(default_factory=list)
     mode: str
     limit: int
     offset: int
@@ -154,11 +155,20 @@ class FeedResponse(BaseModel):
     hasMore: bool = False
 
 
+class FeedCategoryGroupOut(BaseModel):
+    key: str
+    label: str
+    values: list[str] = Field(default_factory=list)
+    count: int = 0
+    isAvailable: bool = False
+
+
 class FeedFiltersOut(BaseModel):
     categories: list[str]
+    categoryGroups: list[FeedCategoryGroupOut] = Field(default_factory=list)
     styles: list[str]
     vibes: list[str]
-    cityConnectionTypes: list[str] = []
+    cityConnectionTypes: list[str] = Field(default_factory=list)
 
 
 
