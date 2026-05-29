@@ -4,10 +4,20 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import Product, Brand, City, Country
-from app.schemas import FeedFiltersOut, FeedProductOut, FeedResponse, ImageAssetOut
+from app.schemas import FeedCategoryGroupOut, FeedFiltersOut, FeedProductOut, FeedResponse, ImageAssetOut
 
 
 router = APIRouter(prefix="/feed", tags=["feed"])
+
+
+CATEGORY_GROUPS = [
+    {"key": "all", "label": "All", "values": []},
+    {"key": "dresses", "label": "Dresses", "values": ["dress"]},
+    {"key": "tops", "label": "Tops", "values": ["tops"]},
+    {"key": "bottoms", "label": "Bottoms", "values": ["bottoms", "pants", "skirt", "shorts"]},
+    {"key": "sets", "label": "Sets", "values": ["set"]},
+    {"key": "shoes", "label": "Shoes", "values": ["shoe", "shoes", "sneaker", "sneakers", "footwear"]},
+]
 
 
 def _price_to_str(value) -> str | None:
@@ -27,6 +37,27 @@ def _apply_curated_catalog_gate(query):
         .filter(Product.normalized_row_id.isnot(None))
     )
 
+
+
+def _normalize_filter_value(value: str | None) -> str | None:
+    if not value:
+        return None
+
+    normalized = value.strip().lower()
+    return normalized or None
+
+
+def _normalize_filter_values(values: list[str] | None) -> list[str]:
+    normalized_values: list[str] = []
+
+    for raw_value in values or []:
+        for part in raw_value.split(","):
+            normalized = _normalize_filter_value(part)
+
+            if normalized and normalized not in normalized_values:
+                normalized_values.append(normalized)
+
+    return normalized_values
 
 def _normalize_city_slug(value: str | None) -> str | None:
     if not value:
@@ -61,6 +92,10 @@ def get_feed_products(
     ),
     mode: str = Query("lock", pattern="^(prioritize|lock)$"),
     category: str | None = Query(None),
+    categories: list[str] | None = Query(
+        None,
+        description="Multiple product categories, e.g. ?categories=bottoms,pants,skirt or repeated categories params.",
+    ),
     style: str | None = Query(None),
     vibe: str | None = Query(None),
     city_connection_type: str | None = Query(
@@ -99,8 +134,14 @@ def get_feed_products(
     if brand_id:
         query = query.filter(Product.brand_id == brand_id)
 
-    if category:
-        query = query.filter(Product.category == category)
+    selected_categories = _normalize_filter_values(categories)
+    selected_category = _normalize_filter_value(category)
+
+    if selected_category and selected_category not in selected_categories:
+        selected_categories.insert(0, selected_category)
+
+    if selected_categories:
+        query = query.filter(func.lower(Product.category).in_(selected_categories))
 
     if style:
         query = query.filter(Product.style == style)
@@ -199,6 +240,7 @@ def get_feed_products(
         total=total,
         selectedCity=city,
         selectedCities=selected_city_slugs,
+        selectedCategories=selected_categories,
         mode=mode,
         limit=limit,
         offset=offset,
@@ -248,8 +290,33 @@ def get_feed_filters(db: Session = Depends(get_db)):
         .all()
     ]
 
+    category_count_rows = (
+        base.with_entities(func.lower(Product.category), func.count(Product.id))
+        .filter(Product.category.isnot(None))
+        .group_by(func.lower(Product.category))
+        .all()
+    )
+    category_counts = {category: count for category, count in category_count_rows if category}
+    total_products = sum(category_counts.values())
+
+    category_groups = []
+    for group in CATEGORY_GROUPS:
+        values = group["values"]
+        count = total_products if not values else sum(category_counts.get(value, 0) for value in values)
+
+        category_groups.append(
+            FeedCategoryGroupOut(
+                key=group["key"],
+                label=group["label"],
+                values=values,
+                count=count,
+                isAvailable=count > 0,
+            )
+        )
+
     return FeedFiltersOut(
         categories=categories,
+        categoryGroups=category_groups,
         styles=styles,
         vibes=vibes,
         cityConnectionTypes=city_connection_types,
