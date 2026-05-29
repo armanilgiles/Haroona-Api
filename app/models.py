@@ -117,6 +117,7 @@ class Product(Base):
 
     name = Column(String(255), nullable=False)
     price = Column(Numeric(10, 2), nullable=True)
+    regular_price = Column(Numeric(10, 2), nullable=True)
     currency = Column(String(3), nullable=False)
     affiliate_url = Column(String, nullable=True)
     merchant_url = Column(String, nullable=True)
@@ -157,7 +158,30 @@ class Product(Base):
     last_seen_at = Column(DateTime(timezone=True), nullable=True)
     deactivated_at = Column(DateTime(timezone=True), nullable=True)
     deactivation_reason = Column(Text, nullable=True)
+    availability_status = Column(String(50), nullable=False, default="unknown")
+    last_price_checked_at = Column(DateTime(timezone=True), nullable=True)
+    price_check_status = Column(String(30), nullable=True)
+    price_check_error = Column(Text, nullable=True)
     
+
+class ProductPriceSnapshot(Base):
+    __tablename__ = "product_price_snapshots"
+
+    id = Column(BigInteger, primary_key=True, index=True, autoincrement=True)
+    product_id = Column(Integer, ForeignKey("products.id", ondelete="CASCADE"), nullable=False, index=True)
+
+    source = Column(String(50), nullable=False, index=True)
+    external_id = Column(String(200), nullable=False, index=True)
+
+    old_price = Column(Numeric(10, 2), nullable=True)
+    new_price = Column(Numeric(10, 2), nullable=True)
+    old_regular_price = Column(Numeric(10, 2), nullable=True)
+    new_regular_price = Column(Numeric(10, 2), nullable=True)
+    old_availability_status = Column(String(50), nullable=True)
+    new_availability_status = Column(String(50), nullable=True)
+
+    checked_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), index=True)
+
 
 class AwinProductFeedRaw(Base):
     __tablename__ = "awin_product_feed_raw"

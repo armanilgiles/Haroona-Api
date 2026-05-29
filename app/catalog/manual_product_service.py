@@ -278,6 +278,7 @@ def upsert_product(
 
     external_id = str(item["external_id"])
     now = datetime.now(timezone.utc)
+    availability = str(item.get("availability") or seed.default_availability)
 
     product = (
         db.query(Product)
@@ -299,6 +300,7 @@ def upsert_product(
     product.advertiser_id = seed.advertiser_id
     product.name = item["name"]
     product.price = _to_decimal(item.get("price"))
+    product.regular_price = _to_decimal(item.get("regular_price", item.get("price")))
     product.currency = seed.currency
     product.affiliate_url = item.get("affiliate_url") or None
     product.merchant_url = item.get("merchant_url") or None
@@ -320,8 +322,18 @@ def upsert_product(
     product.is_active = bool(item.get("is_active", True))
     product.normalized_row_id = normalized_row_id
     product.last_seen_at = now
-    product.deactivated_at = None
-    product.deactivation_reason = None
+    product.availability_status = availability
+    product.last_price_checked_at = now
+    product.price_check_status = "manual_seed"
+    product.price_check_error = None
+
+    if availability.lower().replace("-", "_").replace(" ", "_") == "in_stock":
+        product.deactivated_at = None
+        product.deactivation_reason = None
+    elif product.is_active:
+        product.is_active = False
+        product.deactivated_at = now
+        product.deactivation_reason = f"manual availability={availability}"
 
     db.flush()
     return product

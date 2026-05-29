@@ -106,14 +106,11 @@ def upsert_product(db, row, brand_id, city_id=None):
         product.advertiser_id = row.advertiser_id
         product.name = row.title or product.name
         product.price = row.price_amount or product.price
+        product.regular_price = product.regular_price or row.price_amount
         product.currency = row.currency or "USD"
         product.affiliate_url = affiliate_url
-        product.merchant_url = item.get("merchant_url") or None
-        product.is_affiliate = is_affiliate(item.get("affiliate_url") or "")
-
-        # 🔥 FORCE UPDATE
-        if product.is_affiliate != is_aff:
-            product.is_affiliate = is_aff
+        product.merchant_url = merchant_url
+        product.is_affiliate = is_aff
 
         product.product_image_url = row.image_url or product.product_image_url
         product.product_image_alt = row.title or product.product_image_alt
@@ -122,6 +119,10 @@ def upsert_product(db, row, brand_id, city_id=None):
         product.is_active = True
         product.normalized_row_id = row.id
         product.last_seen_at = now
+        product.availability_status = row.availability or "unknown"
+        product.last_price_checked_at = now
+        product.price_check_status = "promote_awin"
+        product.price_check_error = None
 
         if city_id:
             product.city_id = city_id
@@ -138,8 +139,10 @@ def upsert_product(db, row, brand_id, city_id=None):
         advertiser_id=row.advertiser_id,
         name=row.title or "Untitled",
         price=row.price_amount,
+        regular_price=row.price_amount,
         currency=row.currency or "USD",
         affiliate_url=affiliate_url,
+        merchant_url=merchant_url,
         is_affiliate=is_aff,
         product_image_url=row.image_url,
         product_image_alt=row.title,
@@ -149,6 +152,10 @@ def upsert_product(db, row, brand_id, city_id=None):
         is_active=True,
         normalized_row_id=row.id,
         last_seen_at=now,
+        availability_status=row.availability or "unknown",
+        last_price_checked_at=now,
+        price_check_status="promote_awin",
+        price_check_error=None,
     )
 
     db.add(product)
