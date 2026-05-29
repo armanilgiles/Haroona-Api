@@ -43,6 +43,7 @@ def import_awin_csv(csv_path: str) -> dict:
 
     db = SessionLocal()
     inserted = 0
+    updated = 0
     skipped = 0
 
     try:
@@ -57,43 +58,44 @@ def import_awin_csv(csv_path: str) -> dict:
                     skipped += 1
                     continue
 
-                exists = (
+                record = (
                     db.query(AwinProductFeedRaw)
                     .filter(AwinProductFeedRaw.source_file == file_path.name)
                     .filter(AwinProductFeedRaw.external_product_id == external_product_id)
                     .first()
                 )
-                if exists:
-                    skipped += 1
-                    continue
 
                 normalized_row = {
                     key: (clean_value(value) if key in KEEP_EMPTY_AS_NONE else value)
                     for key, value in row.items()
                 }
 
-                record = AwinProductFeedRaw(
-                    source_file=file_path.name,
-                    advertiser_id=clean_value(row.get("advertiser_id")),
-                    advertiser_name=clean_value(row.get("advertiser_name")),
-                    external_product_id=external_product_id,
-                    title=title,
-                    description=clean_value(row.get("description")),
-                    brand=clean_value(row.get("brand")),
-                    google_product_category=clean_value(row.get("google_product_category")),
-                    product_type=clean_value(row.get("product_type")),
-                    availability=clean_value(row.get("availability")),
-                    condition=clean_value(row.get("condition")),
-                    price_raw=clean_value(row.get("price")),
-                    sale_price_raw=clean_value(row.get("sale_price")),
-                    link=clean_value(row.get("link")),
-                    aw_deep_link=clean_value(row.get("aw_deep_link")),
-                    image_link=clean_value(row.get("image_link")),
-                    additional_image_link=clean_value(row.get("additional_image_link")),
-                    raw_payload=json.dumps(normalized_row, ensure_ascii=False),
-                )
-                db.add(record)
-                inserted += 1
+                if record:
+                    updated += 1
+                else:
+                    record = AwinProductFeedRaw(
+                        source_file=file_path.name,
+                        external_product_id=external_product_id,
+                    )
+                    db.add(record)
+                    inserted += 1
+
+                record.advertiser_id = clean_value(row.get("advertiser_id"))
+                record.advertiser_name = clean_value(row.get("advertiser_name"))
+                record.title = title
+                record.description = clean_value(row.get("description"))
+                record.brand = clean_value(row.get("brand"))
+                record.google_product_category = clean_value(row.get("google_product_category"))
+                record.product_type = clean_value(row.get("product_type"))
+                record.availability = clean_value(row.get("availability"))
+                record.condition = clean_value(row.get("condition"))
+                record.price_raw = clean_value(row.get("price"))
+                record.sale_price_raw = clean_value(row.get("sale_price"))
+                record.link = clean_value(row.get("link"))
+                record.aw_deep_link = clean_value(row.get("aw_deep_link"))
+                record.image_link = clean_value(row.get("image_link"))
+                record.additional_image_link = clean_value(row.get("additional_image_link"))
+                record.raw_payload = json.dumps(normalized_row, ensure_ascii=False)
 
             db.commit()
 
@@ -101,6 +103,7 @@ def import_awin_csv(csv_path: str) -> dict:
             "status": "ok",
             "file": file_path.name,
             "inserted": inserted,
+            "updated": updated,
             "skipped": skipped,
         }
     finally:

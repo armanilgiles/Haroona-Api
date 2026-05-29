@@ -183,6 +183,7 @@ def decide_review_status(
 def normalize_awin_raw(limit: int | None = None) -> dict:
     db = SessionLocal()
     created = 0
+    updated = 0
     skipped = 0
 
     try:
@@ -193,15 +194,6 @@ def normalize_awin_raw(limit: int | None = None) -> dict:
         raw_rows = query.all()
 
         for raw in raw_rows:
-            existing = (
-                db.query(AwinProductNormalized)
-                .filter(AwinProductNormalized.raw_id == raw.id)
-                .first()
-            )
-            if existing:
-                skipped += 1
-                continue
-
             chosen_price_raw = raw.sale_price_raw or raw.price_raw
             price_amount, currency = parse_price(chosen_price_raw)
 
@@ -218,18 +210,7 @@ def normalize_awin_raw(limit: int | None = None) -> dict:
             availability = clean_text(raw.availability)
             availability_lc = (availability or "").lower()
 
-            is_usable = all(
-                [
-                    clean_text(raw.title),
-                    affiliate_url,
-                    image_url,
-                    price_amount is not None,
-                    currency,
-                    availability_lc == "in_stock",
-                ]
-            )
-
-                        brand_control = get_allowed_brand_control(
+            brand_control = get_allowed_brand_control(
                 db=db,
                 source="awin",
                 brand_name=brand_name,
@@ -247,32 +228,42 @@ def normalize_awin_raw(limit: int | None = None) -> dict:
                 brand_control=brand_control,
             )
 
-            record = AwinProductNormalized(
-                raw_id=raw.id,
-                source="awin",
-                external_product_id=raw.external_product_id,
-                advertiser_id=raw.advertiser_id,
-                advertiser_name=raw.advertiser_name,
-                title=clean_text(raw.title) or "Untitled",
-                description=clean_text(raw.description),
-                brand_name=brand_name,
-                price_amount=price_amount,
-                currency=currency,
-                affiliate_url=affiliate_url,
-                merchant_url=merchant_url,
-                image_url=image_url,
-                availability=availability,
-                google_product_category=clean_text(raw.google_product_category),
-                product_type=clean_text(raw.product_type),
-                normalized_category=normalized_category,
-                is_usable=is_usable,
-                needs_review=needs_review,
-                review_status=review_status,
-                review_notes=review_notes,
+            record = (
+                db.query(AwinProductNormalized)
+                .filter(AwinProductNormalized.source == "awin")
+                .filter(AwinProductNormalized.external_product_id == raw.external_product_id)
+                .first()
             )
 
-            db.add(record)
-            created += 1
+            if record:
+                updated += 1
+            else:
+                record = AwinProductNormalized(
+                    source="awin",
+                    external_product_id=raw.external_product_id,
+                )
+                db.add(record)
+                created += 1
+
+            record.raw_id = raw.id
+            record.advertiser_id = raw.advertiser_id
+            record.advertiser_name = raw.advertiser_name
+            record.title = clean_text(raw.title) or "Untitled"
+            record.description = clean_text(raw.description)
+            record.brand_name = brand_name
+            record.price_amount = price_amount
+            record.currency = currency
+            record.affiliate_url = affiliate_url
+            record.merchant_url = merchant_url
+            record.image_url = image_url
+            record.availability = availability
+            record.google_product_category = clean_text(raw.google_product_category)
+            record.product_type = clean_text(raw.product_type)
+            record.normalized_category = normalized_category
+            record.is_usable = is_usable
+            record.needs_review = needs_review
+            record.review_status = review_status
+            record.review_notes = review_notes
 
         db.commit()
 
@@ -283,6 +274,7 @@ def normalize_awin_raw(limit: int | None = None) -> dict:
         return {
             "status": "ok",
             "created": created,
+            "updated": updated,
             "skipped": skipped,
             "usable_total": usable_count,
         }

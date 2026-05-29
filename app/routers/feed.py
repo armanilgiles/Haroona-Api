@@ -55,6 +55,10 @@ def get_feed_products(
         None,
         description="Multiple city slugs, e.g. ?cities=tokyo,seoul or ?cities=tokyo&cities=seoul",
     ),
+    city_slugs: list[str] | None = Query(
+        None,
+        description="Alias for cities. Supports ?city_slugs=tokyo,seoul or repeated city_slugs params.",
+    ),
     mode: str = Query("lock", pattern="^(prioritize|lock)$"),
     category: str | None = Query(None),
     style: str | None = Query(None),
@@ -79,6 +83,11 @@ def get_feed_products(
     query = _apply_curated_catalog_gate(query)
 
     selected_city_slugs = _normalize_city_slugs(cities)
+
+    for city_slug in _normalize_city_slugs(city_slugs):
+        if city_slug not in selected_city_slugs:
+            selected_city_slugs.append(city_slug)
+
     selected_city_slug = _normalize_city_slug(city)
 
     if selected_city_slug and selected_city_slug not in selected_city_slugs:
@@ -191,6 +200,10 @@ def get_feed_products(
         selectedCity=city,
         selectedCities=selected_city_slugs,
         mode=mode,
+        limit=limit,
+        offset=offset,
+        nextOffset=offset + len(items) if offset + len(items) < total else None,
+        hasMore=offset + len(items) < total,
     )
 
 
