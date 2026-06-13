@@ -1,3 +1,5 @@
+import os
+
 from fastapi import Depends, HTTPException, Request, status
 from jose import jwt, JWTError
 from sqlalchemy.orm import Session
@@ -42,6 +44,24 @@ def get_current_user(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User not found",
+        )
+
+    return user
+
+
+def get_admin_user(user: User = Depends(get_current_user)) -> User:
+    """Require a logged-in user before exposing private admin analytics."""
+
+    admin_emails = {
+        email.strip().lower()
+        for email in os.getenv("ADMIN_EMAILS", "").split(",")
+        if email.strip()
+    }
+
+    if admin_emails and user.email.lower() not in admin_emails:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required",
         )
 
     return user
