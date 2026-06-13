@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.auth.dependencies import get_current_user
 from app.auth.jwt import create_access_token
+from app.models import User
 
 router = APIRouter()
 GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
@@ -31,7 +32,11 @@ def logout(response: Response):
 
 
 @router.post("/auth/google")
-def google_auth(data: GoogleAuthRequest, response: Response):
+def google_auth(
+    data: GoogleAuthRequest,
+    response: Response,
+    db: Session = Depends(get_db),
+):
     r = requests.get(
         GOOGLE_USERINFO_URL,
         headers={"Authorization": f"Bearer {data.access_token}"},
@@ -51,6 +56,22 @@ def google_auth(data: GoogleAuthRequest, response: Response):
         raise HTTPException(status_code=401, detail="Google userinfo missing sub")
     if not email:
         raise HTTPException(status_code=400, detail="Google account has no email")
+
+    user = db.query(User).filter(User.id == str(google_id)).first()
+    if not user:
+        user = User(
+            id=str(google_id),
+            email=email,
+            name=name,
+            avatar=avatar,
+        )
+    else:
+        user.email = email
+        user.name = name
+        user.avatar = avatar
+
+    db.add(user)
+    db.commit()
 
     jwt_token = create_access_token({"sub": str(google_id), "email": email})
 
