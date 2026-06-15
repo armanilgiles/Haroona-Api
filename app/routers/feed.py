@@ -104,6 +104,15 @@ def get_feed_products(
     ),
     q: str | None = Query(None),
     brand_id: int | None = Query(None),
+    per_city_limit: int | None = Query(
+        None,
+        ge=1,
+        le=100,
+        description=(
+            "Optional cap per city for all-city discovery pages. "
+            "The cap is applied with the same product ordering as the feed."
+        ),
+    ),
     limit: int = Query(24, ge=1, le=200),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -167,18 +176,39 @@ def get_feed_products(
             )
         )
 
-    count_query = query
-
     shoes_last = case(
         (func.lower(Product.category).in_(["shoe", "shoes", "sneaker", "sneakers", "footwear"]), 1),
         else_=0,
     )
-
-    query = query.order_by(
+    product_ordering = (
         shoes_last.asc(),
         Product.is_best_seller.desc(),
         Product.id.desc(),
     )
+
+    if per_city_limit and not selected_city_slugs:
+        ranked_products = query.with_entities(
+            Product.id.label("product_id"),
+            func.row_number()
+            .over(
+                partition_by=Product.city_id,
+                order_by=product_ordering,
+            )
+            .label("city_rank"),
+        ).subquery()
+
+        query = (
+            db.query(Product)
+            .join(ranked_products, Product.id == ranked_products.c.product_id)
+            .join(Brand)
+            .outerjoin(City)
+            .outerjoin(Country, City.country_id == Country.id)
+            .filter(ranked_products.c.city_rank <= per_city_limit)
+        )
+
+    count_query = query
+
+    query = query.order_by(*product_ordering)
 
     total = count_query.with_entities(func.count(Product.id)).scalar() or 0
     products = query.offset(offset).limit(limit).all()
