@@ -54,7 +54,10 @@ PRODUCTS = [
     },
 ]
 
-SEED = ManualProductSeed(
+# Paris is intentionally paused while London is active.
+# Keep this seed as a reference, but do not expose `SEED`;
+# `manual_seed_registry` skips modules where SEED is None.
+PAUSED_SEED = ManualProductSeed(
     key="lilysilk_paris",
     source=SOURCE,
     source_file=SOURCE_FILE,
@@ -71,3 +74,5 @@ SEED = ManualProductSeed(
     review_notes="Manually curated non-affiliate LILYSILK Paris products.",
     products=PRODUCTS,
 )
+
+SEED = None
