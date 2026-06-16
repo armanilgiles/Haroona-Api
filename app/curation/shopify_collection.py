@@ -50,6 +50,8 @@ class CandidatePayload:
     availability: str | None
     normalized_category: str | None
     target_city_slug: str
+    city_connection_type: str | None
+    city_connection_note: str | None
     haroona_score: int
     score_reasons: list[str]
     review_notes: str | None
@@ -209,6 +211,7 @@ def build_candidate_payloads(options: CollectionScanOptions) -> list[CandidatePa
             tags=tags if isinstance(tags, list) else [],
             target_city_slug=options.target_city_slug,
             normalized_category=normalized_category,
+            merchant_name=options.merchant_name,
         )
 
         review_notes: list[str] = []
@@ -239,6 +242,8 @@ def build_candidate_payloads(options: CollectionScanOptions) -> list[CandidatePa
                 availability=availability,
                 normalized_category=normalized_category,
                 target_city_slug=options.target_city_slug,
+                city_connection_type=score.city_connection_type,
+                city_connection_note=score.city_connection_note,
                 haroona_score=score.score,
                 score_reasons=score.reasons,
                 review_notes="; ".join(review_notes) or None,
@@ -285,6 +290,8 @@ def upsert_product_candidates(db: Session, payloads: list[CandidatePayload]) -> 
         record.availability = payload.availability
         record.normalized_category = payload.normalized_category
         record.target_city_slug = payload.target_city_slug
+        record.city_connection_type = payload.city_connection_type
+        record.city_connection_note = payload.city_connection_note
         record.haroona_score = payload.haroona_score
         record.score_reasons = payload.score_reasons
         record.review_notes = payload.review_notes
@@ -316,6 +323,8 @@ def scan_and_save_shopify_collection(db: Session, options: CollectionScanOptions
                 "image_url": item.image_url,
                 "availability": item.availability,
                 "normalized_category": item.normalized_category,
+                "city_connection_type": item.city_connection_type,
+                "city_connection_note": item.city_connection_note,
                 "haroona_score": item.haroona_score,
                 "score_reasons": item.score_reasons,
                 "review_notes": item.review_notes,

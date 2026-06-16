@@ -2,11 +2,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from app.curation.merchant_profiles import evaluate_merchant_fit
+
 
 @dataclass(frozen=True)
 class ScoreResult:
     score: int
     reasons: list[str]
+    city_connection_type: str | None = None
+    city_connection_note: str | None = None
 
 
 CITY_RULES: dict[str, dict[str, list[str]]] = {
@@ -80,6 +84,7 @@ def score_city_fit(
     tags: list[str] | None = None,
     target_city_slug: str = "london",
     normalized_category: str | None = None,
+    merchant_name: str | None = None,
 ) -> ScoreResult:
     """Simple deterministic Haroona-fit score.
 
@@ -115,9 +120,17 @@ def score_city_fit(
             score += 8
             reasons.append(f"category match: {normalized_category}")
 
-    if "nobody's child" in haystack or "nobodys child" in haystack:
-        score += 3
-        reasons.append("brand fit")
+    merchant_fit = evaluate_merchant_fit(
+        merchant_name=merchant_name,
+        target_city_slug=target_city_slug,
+    )
+    score += merchant_fit.score_adjustment
+    reasons.extend(merchant_fit.reasons)
 
     score = max(0, min(100, score))
-    return ScoreResult(score=score, reasons=reasons[:12])
+    return ScoreResult(
+        score=score,
+        reasons=reasons[:16],
+        city_connection_type=merchant_fit.city_connection_type,
+        city_connection_note=merchant_fit.city_connection_note,
+    )

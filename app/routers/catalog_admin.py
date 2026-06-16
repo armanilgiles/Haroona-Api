@@ -224,6 +224,8 @@ def list_product_candidates(
                 "availability": row.availability,
                 "normalized_category": row.normalized_category,
                 "target_city_slug": row.target_city_slug,
+                "city_connection_type": row.city_connection_type,
+                "city_connection_note": row.city_connection_note,
                 "haroona_score": row.haroona_score,
                 "score_reasons": row.score_reasons,
                 "review_status": row.review_status,
