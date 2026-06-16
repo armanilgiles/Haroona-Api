@@ -308,3 +308,60 @@ class CatalogBrandControl(Base):
 
     def __repr__(self):
         return f"<CatalogBrandControl {self.source}:{self.brand_key}>"
+
+
+class ProductCandidate(Base):
+    __tablename__ = "product_candidates"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    source = Column(String(50), nullable=False, index=True)
+    source_type = Column(String(50), nullable=False, default="collection")
+    source_url = Column(Text, nullable=False)
+
+    merchant_name = Column(String(255), nullable=False, index=True)
+    brand_name = Column(String(255), nullable=True)
+    external_product_id = Column(String(200), nullable=False)
+
+    title = Column(String(500), nullable=False)
+    description = Column(Text, nullable=True)
+
+    price_amount = Column(Numeric(10, 2), nullable=True)
+    currency = Column(String(3), nullable=True)
+
+    affiliate_url = Column(Text, nullable=True)
+    merchant_url = Column(Text, nullable=True)
+    image_url = Column(Text, nullable=True)
+    availability = Column(String(50), nullable=True, index=True)
+    normalized_category = Column(String(80), nullable=True, index=True)
+
+    target_city_slug = Column(String(80), nullable=False, index=True)
+    city_connection_type = Column(String(40), nullable=True)
+    city_connection_note = Column(String(255), nullable=True)
+
+    haroona_score = Column(Integer, nullable=False, default=0, index=True)
+    score_reasons = Column(JSON, nullable=False, default=list)
+
+    review_status = Column(String(20), nullable=False, default="pending", index=True)
+    review_notes = Column(Text, nullable=True)
+    reviewed_at = Column(DateTime(timezone=True), nullable=True)
+    reviewed_by = Column(String(255), nullable=True)
+    rejection_reason = Column(Text, nullable=True)
+
+    promoted_at = Column(DateTime(timezone=True), nullable=True)
+    promoted_product_id = Column(
+        Integer,
+        ForeignKey("products.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), index=True)
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("source", "external_product_id", name="uq_product_candidates_source_external"),
+    )
+
+    def __repr__(self):
+        return f"<ProductCandidate {self.title} score={self.haroona_score}>"
+
