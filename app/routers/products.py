@@ -1,7 +1,7 @@
 from typing import List
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import case, func
+from sqlalchemy import case, func, or_
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
@@ -107,8 +107,8 @@ def get_products(
         .join(Country)
         .outerjoin(City, Product.city_id == City.id)
         .filter(Product.is_active.is_(True))
-        .filter(Product.normalized_row_id.isnot(None))
         .filter(Product.city_id.isnot(None))
+        .filter(or_(Product.normalized_row_id.isnot(None), Product.source == "shopify"))
     )
 
     selected_city_slug = _normalize_city_slug(city)

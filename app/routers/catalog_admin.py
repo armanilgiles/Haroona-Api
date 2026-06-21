@@ -4,10 +4,15 @@ from datetime import datetime, timezone
 
 from pydantic import BaseModel, Field
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import AwinProductNormalized, CatalogBrandControl, ProductCandidate
+from app.models import AwinProductNormalized, Brand, CatalogBrandControl, City, ProductCandidate
+from app.curation.product_candidate_publisher import (
+    publish_approved_product_candidates,
+    publish_product_candidate,
+)
 from app.curation.shopify_collection import CollectionScanOptions, scan_and_save_shopify_collection
 
 router = APIRouter(prefix="/admin/catalog", tags=["admin-catalog"])
@@ -27,6 +32,24 @@ class ReviewCandidateRequest(BaseModel):
     reviewed_by: str = Field("local-admin", min_length=2)
     reason: str | None = None
 
+
+class PublishCandidateRequest(BaseModel):
+    published_by: str = Field("curator-studio", min_length=2)
+
+
+class PublishApprovedCandidatesRequest(BaseModel):
+    published_by: str = Field("curator-studio", min_length=2)
+    target_city_slug: str | None = None
+    limit: int = Field(50, ge=1, le=200)
+
+
+class BrandAssetResolveRequest(BaseModel):
+    brand_name: str = Field(..., min_length=2)
+    target_city_slug: str = Field(..., min_length=2)
+    logo_url: str | None = Field(None, alias="logoUrl")
+
+    class Config:
+        allow_population_by_field_name = True
 
 
 @router.get("/awin-normalized")
@@ -159,6 +182,179 @@ def list_brand_controls(db: Session = Depends(get_db)):
         ]
     }
 
+
+
+def _clean_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def _brand_lookup_name(candidate: ProductCandidate) -> str:
+    return (
+        _clean_text(candidate.brand_name)
+        or _clean_text(candidate.merchant_name)
+        or "Unknown Store"
+    )
+
+
+def _find_brand_for_city(db: Session, *, brand_name: str, city: City) -> Brand | None:
+    return (
+        db.query(Brand)
+        .filter(Brand.country_id == city.country_id)
+        .filter(func.lower(Brand.name) == brand_name.lower())
+        .first()
+    )
+
+
+def _brand_asset_payload(
+    *,
+    brand_name: str,
+    city: City,
+    brand: Brand | None,
+    candidate_count: int,
+    latest_candidate_id: int | None,
+    latest_candidate_title: str | None,
+    latest_source_url: str | None,
+) -> dict:
+    logo_url = _clean_text(brand.logo_url if brand else None)
+    country = city.country
+
+    return {
+        "brand_name": brand.name if brand else brand_name,
+        "target_city_slug": city.slug,
+        "target_city_name": city.name,
+        "country_code": country.code if country else None,
+        "country_name": country.name if country else None,
+        "brand_exists": brand is not None,
+        "brand_id": brand.id if brand else None,
+        "logo_url": logo_url,
+        "logo_status": "ready" if logo_url else "missing",
+        "candidate_count": candidate_count,
+        "latest_candidate_id": latest_candidate_id,
+        "latest_candidate_title": latest_candidate_title,
+        "latest_source_url": latest_source_url,
+    }
+
+
+@router.get("/brand-assets")
+def list_brand_assets(
+    target_city_slug: str | None = Query(None),
+    status: str | None = Query(None),
+    source: str | None = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    db: Session = Depends(get_db),
+):
+    """Summarize stores discovered from candidate products and their logo readiness."""
+    query = db.query(ProductCandidate).order_by(ProductCandidate.id.desc())
+
+    if target_city_slug:
+        query = query.filter(ProductCandidate.target_city_slug == target_city_slug)
+    if status and status != "all":
+        if status == "published":
+            query = query.filter(ProductCandidate.promoted_product_id.isnot(None))
+        else:
+            query = query.filter(ProductCandidate.review_status == status)
+    if source:
+        query = query.filter(ProductCandidate.source == source)
+
+    rows = query.limit(limit).all()
+    city_slugs = sorted({row.target_city_slug for row in rows})
+    cities = {
+        city.slug: city
+        for city in db.query(City).filter(City.slug.in_(city_slugs)).all()
+    } if city_slugs else {}
+
+    grouped: dict[tuple[str, str], dict] = {}
+    for row in rows:
+        city = cities.get(row.target_city_slug)
+        if not city:
+            continue
+
+        brand_name = _brand_lookup_name(row)
+        key = (city.slug, brand_name.strip().lower())
+        group = grouped.setdefault(
+            key,
+            {
+                "brand_name": brand_name,
+                "city": city,
+                "candidate_count": 0,
+                "latest_candidate_id": None,
+                "latest_candidate_title": None,
+                "latest_source_url": None,
+            },
+        )
+        group["candidate_count"] += 1
+        if group["latest_candidate_id"] is None or row.id > group["latest_candidate_id"]:
+            group["latest_candidate_id"] = row.id
+            group["latest_candidate_title"] = row.title
+            group["latest_source_url"] = row.source_url
+
+    items: list[dict] = []
+    for group in grouped.values():
+        city = group["city"]
+        brand_name = group["brand_name"]
+        brand = _find_brand_for_city(db, brand_name=brand_name, city=city)
+        items.append(
+            _brand_asset_payload(
+                brand_name=brand_name,
+                city=city,
+                brand=brand,
+                candidate_count=group["candidate_count"],
+                latest_candidate_id=group["latest_candidate_id"],
+                latest_candidate_title=group["latest_candidate_title"],
+                latest_source_url=group["latest_source_url"],
+            )
+        )
+
+    items.sort(key=lambda item: (item["logo_status"] == "ready", item["brand_name"].lower()))
+
+    return {"items": items, "count": len(items)}
+
+
+@router.post("/brand-assets/resolve")
+def resolve_brand_asset(
+    payload: BrandAssetResolveRequest,
+    db: Session = Depends(get_db),
+):
+    brand_name = _clean_text(payload.brand_name)
+    if not brand_name:
+        raise HTTPException(status_code=400, detail="Brand name is required")
+
+    city = db.query(City).filter(City.slug == payload.target_city_slug).first()
+    if not city:
+        raise HTTPException(status_code=404, detail=f"City '{payload.target_city_slug}' was not found")
+
+    logo_url = _clean_text(payload.logo_url)
+    brand = _find_brand_for_city(db, brand_name=brand_name, city=city)
+    action = "updated" if brand else "created"
+
+    if brand:
+        brand.logo_url = logo_url
+    else:
+        brand = Brand(name=brand_name, country_id=city.country_id, logo_url=logo_url)
+        db.add(brand)
+
+    db.commit()
+    db.refresh(brand)
+
+    return {
+        "status": "ok",
+        "action": action,
+        "item": _brand_asset_payload(
+            brand_name=brand_name,
+            city=city,
+            brand=brand,
+            candidate_count=0,
+            latest_candidate_id=None,
+            latest_candidate_title=None,
+            latest_source_url=None,
+        ),
+    }
+
+
 @router.post("/collection-scan")
 def scan_collection(
     payload: CollectionScanRequest,
@@ -195,7 +391,9 @@ def list_product_candidates(
         ProductCandidate.id.desc(),
     )
 
-    if status:
+    if status == "published":
+        query = query.filter(ProductCandidate.promoted_product_id.isnot(None))
+    elif status:
         query = query.filter(ProductCandidate.review_status == status)
     if source:
         query = query.filter(ProductCandidate.source == source)
@@ -232,12 +430,50 @@ def list_product_candidates(
                 "review_notes": row.review_notes,
                 "rejection_reason": row.rejection_reason,
                 "promoted_product_id": row.promoted_product_id,
+                "promoted_at": row.promoted_at,
                 "created_at": row.created_at,
             }
             for row in rows
         ],
         "count": len(rows),
     }
+
+
+@router.post("/product-candidates/publish-approved")
+def publish_approved_candidates(
+    payload: PublishApprovedCandidatesRequest,
+    db: Session = Depends(get_db),
+):
+    return publish_approved_product_candidates(
+        db,
+        target_city_slug=payload.target_city_slug,
+        limit=payload.limit,
+        published_by=payload.published_by,
+    )
+
+
+@router.post("/product-candidates/{candidate_id}/publish")
+def publish_candidate(
+    candidate_id: int,
+    payload: PublishCandidateRequest | None = None,
+    db: Session = Depends(get_db),
+):
+    row = db.query(ProductCandidate).filter(ProductCandidate.id == candidate_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+
+    payload = payload or PublishCandidateRequest()
+
+    try:
+        return publish_product_candidate(
+            db,
+            row,
+            published_by=payload.published_by,
+        )
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
 
 
 @router.patch("/product-candidates/{candidate_id}/approve")
