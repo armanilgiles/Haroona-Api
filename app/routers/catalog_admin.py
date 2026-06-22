@@ -8,7 +8,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import AwinProductNormalized, Brand, CatalogBrandControl, City, ProductCandidate
+from app.models import AwinProductNormalized, Brand, CatalogBrandControl, City, Product, ProductCandidate
 from app.curation.product_candidate_publisher import (
     publish_approved_product_candidates,
     publish_product_candidate,
@@ -41,6 +41,16 @@ class PublishApprovedCandidatesRequest(BaseModel):
     published_by: str = Field("curator-studio", min_length=2)
     target_city_slug: str | None = None
     limit: int = Field(50, ge=1, le=200)
+
+
+class ArchiveCandidateRequest(BaseModel):
+    archived_by: str = Field("curator-studio", min_length=2)
+    reason: str | None = None
+
+
+class RestoreCandidateRequest(BaseModel):
+    restored_by: str = Field("curator-studio", min_length=2)
+    restore_to: str = Field("pending", min_length=2)
 
 
 class BrandAssetResolveRequest(BaseModel):
@@ -200,6 +210,7 @@ def _brand_lookup_name(candidate: ProductCandidate) -> str:
     )
 
 
+
 def _find_brand_for_city(db: Session, *, brand_name: str, city: City) -> Brand | None:
     return (
         db.query(Brand)
@@ -255,8 +266,11 @@ def list_brand_assets(
     if status and status != "all":
         if status == "published":
             query = query.filter(ProductCandidate.promoted_product_id.isnot(None))
+            query = query.filter(ProductCandidate.review_status != "archived")
         else:
             query = query.filter(ProductCandidate.review_status == status)
+    else:
+        query = query.filter(ProductCandidate.review_status != "archived")
     if source:
         query = query.filter(ProductCandidate.source == source)
 
@@ -392,15 +406,24 @@ def list_product_candidates(
     )
 
     if status == "published":
-        query = query.filter(ProductCandidate.promoted_product_id.isnot(None))
+        query = query.join(Product, ProductCandidate.promoted_product_id == Product.id)
+        query = query.filter(ProductCandidate.review_status != "archived")
+        query = query.filter(Product.is_active.is_(True))
     elif status:
         query = query.filter(ProductCandidate.review_status == status)
+    else:
+        query = query.filter(ProductCandidate.review_status != "archived")
     if source:
         query = query.filter(ProductCandidate.source == source)
     if target_city_slug:
         query = query.filter(ProductCandidate.target_city_slug == target_city_slug)
 
     rows = query.offset(offset).limit(limit).all()
+    product_ids = [row.promoted_product_id for row in rows if row.promoted_product_id]
+    product_active_by_id = {
+        product.id: product.is_active
+        for product in db.query(Product).filter(Product.id.in_(product_ids)).all()
+    } if product_ids else {}
 
     return {
         "items": [
@@ -430,6 +453,7 @@ def list_product_candidates(
                 "review_notes": row.review_notes,
                 "rejection_reason": row.rejection_reason,
                 "promoted_product_id": row.promoted_product_id,
+                "product_is_active": product_active_by_id.get(row.promoted_product_id) if row.promoted_product_id else None,
                 "promoted_at": row.promoted_at,
                 "created_at": row.created_at,
             }
@@ -474,6 +498,104 @@ def publish_candidate(
         db.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+
+
+@router.patch("/product-candidates/{candidate_id}/archive")
+def archive_product_candidate(
+    candidate_id: int,
+    payload: ArchiveCandidateRequest | None = None,
+    db: Session = Depends(get_db),
+):
+    row = db.query(ProductCandidate).filter(ProductCandidate.id == candidate_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+
+    payload = payload or ArchiveCandidateRequest()
+    now = datetime.now(timezone.utc)
+    reason = _clean_text(payload.reason) or "Archived from Curator Studio"
+
+    archived_product_id = row.promoted_product_id
+    product_was_deactivated = False
+
+    if archived_product_id:
+        product = db.query(Product).filter(Product.id == archived_product_id).first()
+        if product:
+            product.is_active = False
+            product.deactivated_at = now
+            product.deactivation_reason = reason
+            product.availability_status = "archived"
+            product.price_check_status = "curator_archive"
+            product_was_deactivated = True
+
+    row.review_status = "archived"
+    row.reviewed_by = payload.archived_by
+    row.reviewed_at = now
+    row.review_notes = reason
+    row.rejection_reason = None
+
+    db.commit()
+
+    return {
+        "status": "ok",
+        "candidate_id": row.id,
+        "review_status": row.review_status,
+        "promoted_product_id": archived_product_id,
+        "product_was_deactivated": product_was_deactivated,
+    }
+
+
+@router.patch("/product-candidates/{candidate_id}/restore")
+def restore_product_candidate(
+    candidate_id: int,
+    payload: RestoreCandidateRequest | None = None,
+    db: Session = Depends(get_db),
+):
+    row = db.query(ProductCandidate).filter(ProductCandidate.id == candidate_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+
+    payload = payload or RestoreCandidateRequest()
+    restore_to = (_clean_text(payload.restore_to) or "pending").lower().replace("-", "_")
+    if restore_to not in {"pending", "live"}:
+        raise HTTPException(status_code=400, detail="restore_to must be 'pending' or 'live'")
+
+    now = datetime.now(timezone.utc)
+    restored_product_id = row.promoted_product_id
+    product_was_reactivated = False
+
+    if restore_to == "live":
+        if not restored_product_id:
+            raise HTTPException(status_code=400, detail="Only previously published candidates can be restored live")
+
+        product = db.query(Product).filter(Product.id == restored_product_id).first()
+        if not product:
+            raise HTTPException(status_code=404, detail="Promoted product was not found")
+
+        product.is_active = True
+        product.deactivated_at = None
+        product.deactivation_reason = None
+        product.availability_status = "in_stock"
+        product.price_check_status = "curator_restore"
+        row.review_status = "approved"
+        row.promoted_at = row.promoted_at or now
+        product_was_reactivated = True
+    else:
+        row.review_status = "pending"
+
+    row.reviewed_by = payload.restored_by
+    row.reviewed_at = now
+    row.review_notes = "Restored from archive"
+    row.rejection_reason = None
+
+    db.commit()
+
+    return {
+        "status": "ok",
+        "candidate_id": row.id,
+        "review_status": row.review_status,
+        "promoted_product_id": restored_product_id,
+        "product_was_reactivated": product_was_reactivated,
+    }
 
 
 @router.patch("/product-candidates/{candidate_id}/approve")
