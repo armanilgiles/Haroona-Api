@@ -12,11 +12,24 @@ from app.utils.affiliate import is_affiliate
 CATEGORY_ALIASES = {
     "dress": "dress",
     "dresses": "dress",
+    "gown": "dress",
+    "gowns": "dress",
     "top": "tops",
     "tops": "tops",
     "shirt": "tops",
+    "shirts": "tops",
     "blouse": "tops",
+    "blouses": "tops",
     "tee": "tops",
+    "tees": "tops",
+    "t-shirt": "tops",
+    "t-shirts": "tops",
+    "camisole": "tops",
+    "camisoles": "tops",
+    "tank": "tops",
+    "tanks": "tops",
+    "vest": "tops",
+    "vests": "tops",
     "bottom": "bottoms",
     "bottoms": "bottoms",
     "pant": "bottoms",
@@ -39,12 +52,28 @@ CATEGORY_ALIASES = {
     "shoes": "shoe",
     "sneaker": "shoe",
     "sneakers": "shoe",
+    "boot": "shoe",
+    "boots": "shoe",
+    "heel": "shoe",
+    "heels": "shoe",
+    "sandal": "shoe",
+    "sandals": "shoe",
     "footwear": "shoe",
     "bag": "bags",
     "bags": "bags",
     "jewelry": "jewelry",
     "jewellery": "jewelry",
 }
+
+CATEGORY_INFERENCE_RULES = [
+    (["dress", "gown"], "dress"),
+    (["skirt", "trouser", "pant", "jean", "short"], "bottoms"),
+    (["top", "blouse", "shirt", "vest", "tee", "t-shirt", "camisole", "tank"], "tops"),
+    (["co-ord", "co ord", "set"], "set"),
+    (["bag", "purse", "tote"], "bags"),
+    (["shoe", "sandal", "boot", "heel"], "shoe"),
+    (["necklace", "earring", "bracelet", "ring", "jewellery", "jewelry"], "jewelry"),
+]
 
 
 def _clean(value: str | None) -> str | None:
@@ -55,7 +84,24 @@ def _clean(value: str | None) -> str | None:
     return cleaned or None
 
 
-def _normalize_category(value: str | None) -> str | None:
+def _infer_category_from_text(value: str | None) -> str | None:
+    haystack = (value or "").lower()
+
+    for keywords, category in CATEGORY_INFERENCE_RULES:
+        if any(keyword in haystack for keyword in keywords):
+            return category
+
+    return None
+
+
+def _normalize_category(value: str | None, *, title: str | None = None) -> str | None:
+    # A candidate can come from a mixed collection where the admin-entered
+    # category hint was too broad. Trust obvious title words like "Top",
+    # "Blouse", "Skirt", etc. over the stale hint before publishing.
+    inferred_from_title = _infer_category_from_text(title)
+    if inferred_from_title:
+        return inferred_from_title
+
     cleaned = _clean(value)
     if not cleaned:
         return None
@@ -166,7 +212,7 @@ def publish_product_candidate(
     product.product_image_alt = candidate.title
     product.brand_id = brand.id
     product.city_id = city.id
-    product.category = _normalize_category(candidate.normalized_category)
+    product.category = _normalize_category(candidate.normalized_category, title=candidate.title)
     product.style = None
     product.vibe = None
     product.is_best_seller = candidate.haroona_score >= 95

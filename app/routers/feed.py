@@ -1,3 +1,5 @@
+import re
+
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import case, distinct, func, or_
 from sqlalchemy.orm import Session
@@ -12,12 +14,283 @@ router = APIRouter(prefix="/feed", tags=["feed"])
 
 CATEGORY_GROUPS = [
     {"key": "all", "label": "All", "values": []},
-    {"key": "dresses", "label": "Dresses", "values": ["dress"]},
-    {"key": "tops", "label": "Tops", "values": ["tops"]},
-    {"key": "bottoms", "label": "Bottoms", "values": ["bottoms", "pants", "skirt", "shorts"]},
-    {"key": "sets", "label": "Sets", "values": ["set"]},
-    {"key": "shoes", "label": "Shoes", "values": ["shoe", "shoes", "sneaker", "sneakers", "footwear"]},
+    {"key": "dresses", "label": "Dresses", "values": ["dress", "dresses", "gown", "gowns"]},
+    {
+        "key": "tops",
+        "label": "Tops",
+        "values": [
+            "top",
+            "tops",
+            "shirt",
+            "shirts",
+            "blouse",
+            "blouses",
+            "tee",
+            "tees",
+            "t-shirt",
+            "t-shirts",
+            "vest",
+            "vests",
+            "camisole",
+            "camisoles",
+            "tank",
+            "tanks",
+        ],
+    },
+    {
+        "key": "bottoms",
+        "label": "Bottoms",
+        "values": [
+            "bottom",
+            "bottoms",
+            "pant",
+            "pants",
+            "trouser",
+            "trousers",
+            "jean",
+            "jeans",
+            "skirt",
+            "skirts",
+            "short",
+            "shorts",
+        ],
+    },
+    {"key": "sets", "label": "Sets", "values": ["set", "sets", "co-ord", "co-ords", "co ord", "co ords"]},
+    {"key": "shoes", "label": "Shoes", "values": ["shoe", "shoes", "sneaker", "sneakers", "boot", "boots", "heel", "heels", "sandal", "sandals", "footwear"]},
+    {"key": "bags", "label": "Bags", "values": ["bag", "bags", "handbag", "handbags", "purse", "purses", "tote", "totes"]},
+    {"key": "accessories", "label": "Accessories", "values": ["accessory", "accessories", "belt", "belts", "hat", "hats", "scarf", "scarves"]},
+    {"key": "jewelry", "label": "Jewelry", "values": ["jewelry", "jewellery", "necklace", "necklaces", "earring", "earrings", "bracelet", "bracelets", "ring", "rings"]},
 ]
+
+
+CATEGORY_ALIASES = {
+    "dress": "dresses",
+    "dresses": "dresses",
+    "gown": "dresses",
+    "gowns": "dresses",
+    "top": "tops",
+    "tops": "tops",
+    "shirt": "tops",
+    "shirts": "tops",
+    "blouse": "tops",
+    "blouses": "tops",
+    "tee": "tops",
+    "tees": "tops",
+    "t-shirt": "tops",
+    "t-shirts": "tops",
+    "camisole": "tops",
+    "camisoles": "tops",
+    "tank": "tops",
+    "tanks": "tops",
+    "vest": "tops",
+    "vests": "tops",
+    "bottom": "bottoms",
+    "bottoms": "bottoms",
+    "pant": "bottoms",
+    "pants": "bottoms",
+    "trouser": "bottoms",
+    "trousers": "bottoms",
+    "jean": "bottoms",
+    "jeans": "bottoms",
+    "skirt": "bottoms",
+    "skirts": "bottoms",
+    "short": "bottoms",
+    "shorts": "bottoms",
+    "set": "sets",
+    "sets": "sets",
+    "co-ord": "sets",
+    "co-ords": "sets",
+    "co ord": "sets",
+    "co ords": "sets",
+    "shoe": "shoes",
+    "shoes": "shoes",
+    "sneaker": "shoes",
+    "sneakers": "shoes",
+    "boot": "shoes",
+    "boots": "shoes",
+    "heel": "shoes",
+    "heels": "shoes",
+    "sandal": "shoes",
+    "sandals": "shoes",
+    "footwear": "shoes",
+    "bag": "bags",
+    "bags": "bags",
+    "handbag": "bags",
+    "handbags": "bags",
+    "purse": "bags",
+    "purses": "bags",
+    "tote": "bags",
+    "totes": "bags",
+    "jewelry": "jewelry",
+    "jewellery": "jewelry",
+    "necklace": "jewelry",
+    "necklaces": "jewelry",
+    "earring": "jewelry",
+    "earrings": "jewelry",
+    "bracelet": "jewelry",
+    "bracelets": "jewelry",
+    "ring": "jewelry",
+    "rings": "jewelry",
+    "accessory": "accessories",
+    "accessories": "accessories",
+    "belt": "accessories",
+    "belts": "accessories",
+    "hat": "accessories",
+    "hats": "accessories",
+    "scarf": "accessories",
+    "scarves": "accessories",
+}
+
+CATEGORY_INFERENCE_RULES = [
+    (["dress", "gown"], "dresses"),
+    (["skirt", "trouser", "pant", "jean", "short"], "bottoms"),
+    (["top", "blouse", "shirt", "vest", "tee", "t-shirt", "camisole", "tank"], "tops"),
+    (["co-ord", "co-ords", "co ord", "co ords", "set"], "sets"),
+    (["bag", "handbag", "purse", "tote"], "bags"),
+    (["shoe", "sandal", "boot", "heel", "sneaker"], "shoes"),
+    (["necklace", "earring", "bracelet", "ring", "jewellery", "jewelry"], "jewelry"),
+]
+
+
+def _slugify_category(value: str) -> str:
+    slug = value.strip().lower().replace("&", "and")
+    slug = "-".join(part for part in slug.replace("_", "-").split() if part)
+    slug = "".join(char if char.isalnum() or char == "-" else "-" for char in slug)
+
+    while "--" in slug:
+        slug = slug.replace("--", "-")
+
+    return slug.strip("-")
+
+
+
+def _canonical_category(value: str | None) -> str | None:
+    if not value:
+        return None
+
+    normalized = _slugify_category(value)
+    if not normalized:
+        return None
+
+    return CATEGORY_ALIASES.get(normalized, normalized)
+
+
+def _keyword_pattern(keyword: str) -> str:
+    # Match whole-ish words across spaces/hyphens without matching things like
+    # "topaz". Examples: "Sia Top", "t-shirt", "co ord".
+    escaped = re.escape(keyword).replace(r"\ ", r"[\s-]+")
+    return rf"(?<![a-z0-9]){escaped}(?![a-z0-9])"
+
+
+def _text_has_keyword(text: str, keyword: str) -> bool:
+    return re.search(_keyword_pattern(keyword), text.lower()) is not None
+
+
+def _infer_category_from_title(title: str | None) -> str | None:
+    haystack = title or ""
+    if not haystack:
+        return None
+
+    for keywords, category in CATEGORY_INFERENCE_RULES:
+        if any(_text_has_keyword(haystack, keyword) for keyword in keywords):
+            return category
+
+    return None
+
+
+def _resolve_product_category(title: str | None, category: str | None) -> str | None:
+    # Title wins over stale category values. This fixes already-published items
+    # that were scanned with a collection hint like "dresses" even though the
+    # product title is "Sia Top".
+    inferred = _infer_category_from_title(title)
+    if inferred:
+        return inferred
+
+    return _canonical_category(category)
+
+
+def _category_title_filter_clauses(selected_categories: list[str]):
+    selected = {_canonical_category(value) for value in selected_categories}
+    selected.discard(None)
+
+    clauses = []
+    for keywords, category in CATEGORY_INFERENCE_RULES:
+        if category not in selected:
+            continue
+
+        for keyword in keywords:
+            clauses.append(Product.name.ilike(f"%{keyword}%"))
+
+    return clauses
+
+
+def _label_category(value: str) -> str:
+    custom_labels = {
+        "co-ords": "Sets",
+        "co-ord": "Sets",
+        "t-shirt": "T-Shirts",
+        "t-shirts": "T-Shirts",
+    }
+    slug = _slugify_category(value)
+    if slug in custom_labels:
+        return custom_labels[slug]
+
+    return " ".join(part.capitalize() for part in slug.split("-") if part) or value.title()
+
+
+def _build_category_groups(category_counts: dict[str, int]) -> list[FeedCategoryGroupOut]:
+    total_products = sum(category_counts.values())
+    groups: list[FeedCategoryGroupOut] = [
+        FeedCategoryGroupOut(
+            key="all",
+            label="All",
+            values=[],
+            count=total_products,
+            isAvailable=total_products > 0,
+        )
+    ]
+
+    claimed_values: set[str] = set()
+
+    for group in CATEGORY_GROUPS:
+        if group["key"] == "all":
+            continue
+
+        values = [_slugify_category(value) for value in group["values"]]
+        count = sum(category_counts.get(value, 0) for value in values)
+
+        if count <= 0:
+            continue
+
+        claimed_values.update(values)
+        groups.append(
+            FeedCategoryGroupOut(
+                key=group["key"],
+                label=group["label"],
+                values=values,
+                count=count,
+                isAvailable=True,
+            )
+        )
+
+    dynamic_categories = sorted(
+        (category, count)
+        for category, count in category_counts.items()
+        if count > 0 and category not in claimed_values
+    )
+
+    for category, count in dynamic_categories:
+        groups.append(
+            FeedCategoryGroupOut(
+                key=_slugify_category(category),
+                label=_label_category(category),
+                values=[category],
+                count=count,
+                isAvailable=True,
+            )
+        )
+
+    return groups
 
 
 def _price_to_str(value) -> str | None:
@@ -151,7 +424,21 @@ def get_feed_products(
         selected_categories.insert(0, selected_category)
 
     if selected_categories:
-        query = query.filter(func.lower(Product.category).in_(selected_categories))
+        selected_category_aliases = {
+            _canonical_category(value) for value in selected_categories
+        }
+        selected_category_aliases.discard(None)
+        selected_category_values = list({
+            *selected_categories,
+            *[value for value in selected_category_aliases if value],
+        })
+
+        query = query.filter(
+            or_(
+                func.lower(Product.category).in_(selected_category_values),
+                *_category_title_filter_clauses(selected_categories),
+            )
+        )
 
     if style:
         query = query.filter(Product.style == style)
@@ -259,7 +546,7 @@ def get_feed_products(
 
                 citySlug=city_obj.slug if city_obj else None,
                 cityName=city_obj.name if city_obj else None,
-                category=p.category,
+                category=_resolve_product_category(p.name, p.category) or p.category,
                 style=p.style,
                 vibe=p.vibe,
                 isBestSeller=p.is_best_seller,
@@ -321,29 +608,18 @@ def get_feed_filters(db: Session = Depends(get_db)):
         .all()
     ]
 
-    category_count_rows = (
-        base.with_entities(func.lower(Product.category), func.count(Product.id))
-        .filter(Product.category.isnot(None))
-        .group_by(func.lower(Product.category))
-        .all()
-    )
-    category_counts = {category: count for category, count in category_count_rows if category}
-    total_products = sum(category_counts.values())
+    category_rows = base.with_entities(Product.name, Product.category).all()
+    category_counts: dict[str, int] = {}
+    for product_name, category in category_rows:
+        normalized_category = _resolve_product_category(product_name, category)
+        if not normalized_category:
+            continue
 
-    category_groups = []
-    for group in CATEGORY_GROUPS:
-        values = group["values"]
-        count = total_products if not values else sum(category_counts.get(value, 0) for value in values)
-
-        category_groups.append(
-            FeedCategoryGroupOut(
-                key=group["key"],
-                label=group["label"],
-                values=values,
-                count=count,
-                isAvailable=count > 0,
-            )
+        category_counts[normalized_category] = (
+            category_counts.get(normalized_category, 0) + 1
         )
+
+    category_groups = _build_category_groups(category_counts)
 
     return FeedFiltersOut(
         categories=categories,

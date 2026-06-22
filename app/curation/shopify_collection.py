@@ -127,24 +127,40 @@ def _choose_variant(variants: list[dict[str, Any]]) -> dict[str, Any] | None:
     return variants[0]
 
 
+CATEGORY_INFERENCE_RULES = [
+    (["dress", "gown"], "dress"),
+    (["skirt"], "bottoms"),
+    (["trouser", "pant", "jean", "short"], "bottoms"),
+    (["top", "blouse", "shirt", "vest", "tee", "t-shirt", "camisole", "tank"], "tops"),
+    (["co-ord", "co ord", "set"], "co-ords"),
+    (["bag", "purse", "tote"], "bags"),
+    (["shoe", "sandal", "boot", "heel"], "shoes"),
+    (["necklace", "earring", "bracelet", "ring", "jewellery", "jewelry"], "jewelry"),
+]
+
+
+def _infer_category_from_text(title: str | None, product_type: str | None) -> str | None:
+    haystack = f"{title or ''} {product_type or ''}".lower()
+
+    for keywords, category in CATEGORY_INFERENCE_RULES:
+        if any(keyword in haystack for keyword in keywords):
+            return category
+
+    return None
+
+
 def _normalize_category(title: str, product_type: str | None, fallback: str | None) -> str | None:
+    # Prefer the actual Shopify product title/type over the collection-level
+    # category hint. A collection can contain a mix of dresses, skirts, and tops;
+    # if the hint says "dresses" but the product is named "Sia Top", the product
+    # should publish as Tops so the London filter appears dynamically.
+    inferred_category = _infer_category_from_text(title, product_type)
+    if inferred_category:
+        return inferred_category
+
     if fallback:
         return fallback
 
-    haystack = f"{title} {product_type or ''}".lower()
-    rules = [
-        (["dress", "gown"], "dress"),
-        (["skirt"], "skirt"),
-        (["trouser", "pant", "jean", "short"], "bottoms"),
-        (["top", "blouse", "shirt", "vest", "tee", "camisole"], "tops"),
-        (["co-ord", "co ord", "set"], "co-ords"),
-        (["bag", "purse", "tote"], "bags"),
-        (["shoe", "sandal", "boot", "heel"], "shoes"),
-        (["necklace", "earring", "bracelet", "ring", "jewellery", "jewelry"], "jewelry"),
-    ]
-    for keywords, category in rules:
-        if any(keyword in haystack for keyword in keywords):
-            return category
     return None
 
 
