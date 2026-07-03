@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from html import unescape
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, urlunparse
 
 import requests
 from sqlalchemy.orm import Session
@@ -76,6 +76,11 @@ def _parse_decimal(value: str | int | float | None) -> Decimal | None:
         return None
 
 
+def _clean_collection_source_url(source_url: str) -> str:
+    parsed = urlparse(source_url.strip())
+    return urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
+
+
 def _collection_handle_from_url(source_url: str) -> str:
     parsed = urlparse(source_url)
     parts = [part for part in parsed.path.split("/") if part]
@@ -100,6 +105,7 @@ def _locale_prefix_from_url(source_url: str) -> str:
 
 
 def _json_endpoint_candidates(source_url: str) -> list[str]:
+    source_url = _clean_collection_source_url(source_url)
     parsed = urlparse(source_url)
     origin = f"{parsed.scheme}://{parsed.netloc}"
     handle = _collection_handle_from_url(source_url)
@@ -113,6 +119,7 @@ def _json_endpoint_candidates(source_url: str) -> list[str]:
 
 
 def _build_product_url(source_url: str, handle: str) -> str:
+    source_url = _clean_collection_source_url(source_url)
     parsed = urlparse(source_url)
     origin = f"{parsed.scheme}://{parsed.netloc}"
     locale_prefix = _locale_prefix_from_url(source_url)
@@ -197,6 +204,7 @@ def fetch_shopify_collection_products(options: CollectionScanOptions) -> list[di
 def build_candidate_payloads(options: CollectionScanOptions) -> list[CandidatePayload]:
     products = fetch_shopify_collection_products(options)
     payloads: list[CandidatePayload] = []
+    clean_source_url = _clean_collection_source_url(options.source_url)
 
     for product in products:
         title = (product.get("title") or "").strip()
@@ -208,7 +216,7 @@ def build_candidate_payloads(options: CollectionScanOptions) -> list[CandidatePa
         variants = product.get("variants") or []
         variant = _choose_variant(variants)
         price_amount = _parse_decimal(variant.get("price") if variant else None)
-        currency = "USD" if "/en-us/" in options.source_url else None
+        currency = "USD" if "/en-us/" in clean_source_url else None
         availability = "in_stock" if any(v.get("available") is True for v in variants) else "out_of_stock"
 
         images = product.get("images") or []
@@ -245,7 +253,7 @@ def build_candidate_payloads(options: CollectionScanOptions) -> list[CandidatePa
             CandidatePayload(
                 source=options.source,
                 source_type=options.source_type,
-                source_url=options.source_url,
+                source_url=clean_source_url,
                 merchant_name=options.merchant_name,
                 brand_name=product.get("vendor") or options.merchant_name,
                 external_product_id=external_id,
@@ -254,7 +262,7 @@ def build_candidate_payloads(options: CollectionScanOptions) -> list[CandidatePa
                 price_amount=price_amount,
                 currency=currency,
                 affiliate_url=None,
-                merchant_url=_build_product_url(options.source_url, handle),
+                merchant_url=_build_product_url(clean_source_url, handle),
                 image_url=image_url,
                 availability=availability,
                 normalized_category=normalized_category,
@@ -271,17 +279,69 @@ def build_candidate_payloads(options: CollectionScanOptions) -> list[CandidatePa
     return payloads[: options.limit]
 
 
+def _candidate_dedupe_key(payload: CandidatePayload) -> tuple[str, str]:
+    return (payload.source, payload.external_product_id)
+
+
+def _prefer_candidate_payload(current: CandidatePayload, incoming: CandidatePayload) -> CandidatePayload:
+    if incoming.haroona_score > current.haroona_score:
+        return incoming
+    if incoming.haroona_score == current.haroona_score and incoming.image_url and not current.image_url:
+        return incoming
+    return current
+
+
+def _dedupe_candidate_payloads(payloads: list[CandidatePayload]) -> tuple[list[CandidatePayload], int]:
+    by_key: dict[tuple[str, str], CandidatePayload] = {}
+    duplicate_count = 0
+
+    for payload in payloads:
+        key = _candidate_dedupe_key(payload)
+        current = by_key.get(key)
+        if current is None:
+            by_key[key] = payload
+            continue
+
+        duplicate_count += 1
+        by_key[key] = _prefer_candidate_payload(current, payload)
+
+    return list(by_key.values()), duplicate_count
+
+
+def _existing_candidates_by_key(
+    db: Session,
+    payloads: list[CandidatePayload],
+) -> dict[tuple[str, str], ProductCandidate]:
+    ids_by_source: dict[str, set[str]] = {}
+    for payload in payloads:
+        ids_by_source.setdefault(payload.source, set()).add(payload.external_product_id)
+
+    existing: dict[tuple[str, str], ProductCandidate] = {}
+    for source, external_ids in ids_by_source.items():
+        if not external_ids:
+            continue
+
+        rows = (
+            db.query(ProductCandidate)
+            .filter(ProductCandidate.source == source)
+            .filter(ProductCandidate.external_product_id.in_(external_ids))
+            .all()
+        )
+        for row in rows:
+            existing[(row.source, row.external_product_id)] = row
+
+    return existing
+
+
 def upsert_product_candidates(db: Session, payloads: list[CandidatePayload]) -> dict[str, int]:
+    payloads, skipped_duplicates = _dedupe_candidate_payloads(payloads)
+    existing_by_key = _existing_candidates_by_key(db, payloads)
     created = 0
     updated = 0
 
     for payload in payloads:
-        record = (
-            db.query(ProductCandidate)
-            .filter(ProductCandidate.source == payload.source)
-            .filter(ProductCandidate.external_product_id == payload.external_product_id)
-            .first()
-        )
+        key = _candidate_dedupe_key(payload)
+        record = existing_by_key.get(key)
 
         if record:
             updated += 1
@@ -291,6 +351,7 @@ def upsert_product_candidates(db: Session, payloads: list[CandidatePayload]) -> 
                 external_product_id=payload.external_product_id,
             )
             db.add(record)
+            existing_by_key[key] = record
             created += 1
 
         record.source_type = payload.source_type
@@ -317,7 +378,7 @@ def upsert_product_candidates(db: Session, payloads: list[CandidatePayload]) -> 
             record.review_status = "pending"
 
     db.commit()
-    return {"created": created, "updated": updated}
+    return {"created": created, "updated": updated, "skipped_duplicates": skipped_duplicates}
 
 
 def scan_and_save_shopify_collection(db: Session, options: CollectionScanOptions) -> dict[str, Any]:
@@ -325,7 +386,7 @@ def scan_and_save_shopify_collection(db: Session, options: CollectionScanOptions
     counts = upsert_product_candidates(db, payloads)
     return {
         "status": "ok",
-        "source_url": options.source_url,
+        "source_url": _clean_collection_source_url(options.source_url),
         "merchant_name": options.merchant_name,
         "target_city_slug": options.target_city_slug,
         "image_mode": options.image_mode,

@@ -4,7 +4,7 @@ import base64
 import io
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 from html.parser import HTMLParser
 from typing import Any
@@ -50,6 +50,12 @@ class ImageCandidateChoice:
     url: str
     score: int
 
+
+@dataclass
+class ShopCiderScanCache:
+    image_loads: dict[str, bool] = field(default_factory=dict)
+    image_previews: dict[str, bytes | None] = field(default_factory=dict)
+    product_page_images: dict[str, list[str]] = field(default_factory=dict)
 
 
 class _ProductAnchorParser(HTMLParser):
@@ -99,6 +105,7 @@ class _ProductAnchorParser(HTMLParser):
                 href=item["href"],
                 text=text,
                 image_url=item.get("image_url"),
+                image_urls=item.get("image_urls") if isinstance(item.get("image_urls"), list) else [],
             )
             if parsed:
                 self.items.append(parsed)
@@ -371,6 +378,43 @@ def _download_image_preview(
     return None
 
 
+def _cached_image_url_loads(
+    image_url: str,
+    *,
+    timeout_seconds: int = 6,
+    cache: ShopCiderScanCache | None = None,
+) -> bool:
+    if cache is None:
+        return _image_url_loads(image_url, timeout_seconds=timeout_seconds)
+
+    cached = cache.image_loads.get(image_url)
+    if cached is not None:
+        return cached
+
+    loaded = _image_url_loads(image_url, timeout_seconds=timeout_seconds)
+    cache.image_loads[image_url] = loaded
+    return loaded
+
+
+def _cached_download_image_preview(
+    image_url: str,
+    *,
+    timeout_seconds: int = 6,
+    cache: ShopCiderScanCache | None = None,
+) -> bytes | None:
+    if cache is None:
+        return _download_image_preview(image_url, timeout_seconds=timeout_seconds)
+
+    if image_url in cache.image_previews:
+        return cache.image_previews[image_url]
+
+    preview = _download_image_preview(image_url, timeout_seconds=timeout_seconds)
+    cache.image_previews[image_url] = preview
+    if preview is not None:
+        cache.image_loads[image_url] = True
+    return preview
+
+
 def _score_likely_model_worn_image(image_bytes: bytes) -> int:
     """Return a heuristic score that prefers lifestyle/model-worn photos.
 
@@ -453,6 +497,7 @@ def _first_verified_shopcider_image_url(
     image_urls: list[str | None],
     base_url: str,
     timeout_seconds: int = 6,
+    cache: ShopCiderScanCache | None = None,
 ) -> str | None:
     candidates: list[str] = []
     for image_url in image_urls:
@@ -465,7 +510,7 @@ def _first_verified_shopcider_image_url(
             break
 
     for candidate in candidates:
-        if _image_url_loads(candidate, timeout_seconds=timeout_seconds):
+        if _cached_image_url_loads(candidate, timeout_seconds=timeout_seconds, cache=cache):
             return candidate
 
     return None
@@ -476,6 +521,7 @@ def _best_verified_shopcider_image_url(
     base_url: str,
     timeout_seconds: int = 6,
     require_model: bool = False,
+    cache: ShopCiderScanCache | None = None,
 ) -> str | None:
     candidates: list[str] = []
     for image_url in image_urls:
@@ -489,7 +535,7 @@ def _best_verified_shopcider_image_url(
 
     best_choice: ImageCandidateChoice | None = None
     for index, candidate in enumerate(candidates):
-        preview = _download_image_preview(candidate, timeout_seconds=timeout_seconds)
+        preview = _cached_download_image_preview(candidate, timeout_seconds=timeout_seconds, cache=cache)
         if preview is None:
             continue
 
@@ -510,8 +556,9 @@ def _verified_shopcider_image_url(
     image_url: str | None,
     base_url: str,
     timeout_seconds: int = 6,
+    cache: ShopCiderScanCache | None = None,
 ) -> str | None:
-    return _best_verified_shopcider_image_url([image_url], base_url, timeout_seconds=timeout_seconds)
+    return _best_verified_shopcider_image_url([image_url], base_url, timeout_seconds=timeout_seconds, cache=cache)
 
 
 def _extract_external_product_id(merchant_url: str, fallback: str) -> str:
@@ -555,6 +602,7 @@ def _candidate_from_anchor_text(
     href: str,
     text: str,
     image_url: str | None,
+    image_urls: list[str] | None = None,
 ) -> dict[str, Any] | None:
     if not text:
         return None
@@ -577,7 +625,7 @@ def _candidate_from_anchor_text(
     if len(title) < 4:
         return None
 
-    image_candidates = [image_url, *_image_candidates_from_tracking_query(href, href)]
+    image_candidates = [image_url, *(image_urls or []), *_image_candidates_from_tracking_query(href, href)]
     image_urls = _dedupe_strings(image_candidates)
     image_url = image_urls[0] if image_urls else None
     clean_url = _clean_product_url(href)
@@ -844,6 +892,60 @@ def _extract_items_from_anchors(html: str, base_url: str) -> list[dict[str, Any]
     return items
 
 
+def _merge_shopcider_item(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+    merged = {**existing}
+
+    for key in (
+        "title",
+        "description",
+        "price_amount",
+        "currency",
+        "merchant_url",
+        "availability",
+        "product_type",
+        "brand_name",
+    ):
+        if not merged.get(key) and incoming.get(key):
+            merged[key] = incoming[key]
+
+    image_urls = _dedupe_strings(
+        [
+            merged.get("image_url"),
+            incoming.get("image_url"),
+            *(merged.get("image_urls") if isinstance(merged.get("image_urls"), list) else []),
+            *(incoming.get("image_urls") if isinstance(incoming.get("image_urls"), list) else []),
+        ]
+    )
+    merged["image_urls"] = image_urls
+    merged["image_url"] = image_urls[0] if image_urls else None
+
+    tags: list[str] = []
+    for value in (existing.get("tags"), incoming.get("tags")):
+        if isinstance(value, list):
+            tags.extend(str(item) for item in value if item)
+    merged["tags"] = _dedupe_strings(tags)
+
+    return merged
+
+
+def _merge_shopcider_items(*item_groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_id: dict[str, dict[str, Any]] = {}
+
+    for items in item_groups:
+        for item in items:
+            external_id = str(item.get("external_product_id") or "").strip()
+            if not external_id:
+                continue
+
+            current = by_id.get(external_id)
+            if current is None:
+                by_id[external_id] = item
+            else:
+                by_id[external_id] = _merge_shopcider_item(current, item)
+
+    return list(by_id.values())
+
+
 def fetch_shopcider_category_products(options: CollectionScanOptions) -> list[dict[str, Any]]:
     source_url = _clean_source_url(options.source_url)
     if not _is_shopcider_listing_url(source_url):
@@ -862,9 +964,10 @@ def fetch_shopcider_category_products(options: CollectionScanOptions) -> list[di
         raise RuntimeError(f"ShopCider category page returned HTTP {response.status_code}")
 
     html = response.text
-    items = _extract_items_from_json(html, source_url)
-    if not items:
-        items = _extract_items_from_anchors(html, source_url)
+    items = _merge_shopcider_items(
+        _extract_items_from_json(html, source_url),
+        _extract_items_from_anchors(html, source_url),
+    )
 
     if not items:
         listing_label = _shopcider_listing_label(source_url)
@@ -900,9 +1003,13 @@ def _extract_shopcider_image_urls_from_html(html: str, base_url: str) -> list[st
 def _image_candidates_from_product_page(
     merchant_url: str | None,
     timeout_seconds: int = 6,
+    cache: ShopCiderScanCache | None = None,
 ) -> list[str]:
     if not merchant_url:
         return []
+
+    if cache is not None and merchant_url in cache.product_page_images:
+        return cache.product_page_images[merchant_url]
 
     headers = {
         "User-Agent": USER_AGENT,
@@ -913,12 +1020,19 @@ def _image_candidates_from_product_page(
     try:
         response = requests.get(merchant_url, headers=headers, timeout=min(max(timeout_seconds, 2), 6))
     except requests.RequestException:
+        if cache is not None:
+            cache.product_page_images[merchant_url] = []
         return []
 
     if response.status_code >= 400:
+        if cache is not None:
+            cache.product_page_images[merchant_url] = []
         return []
 
-    return _extract_shopcider_image_urls_from_html(response.text, merchant_url)
+    image_urls = _extract_shopcider_image_urls_from_html(response.text, merchant_url)
+    if cache is not None:
+        cache.product_page_images[merchant_url] = image_urls
+    return image_urls
 
 
 def _image_candidates_for_product(
@@ -926,6 +1040,7 @@ def _image_candidates_for_product(
     base_url: str,
     timeout_seconds: int = 6,
     include_product_page: bool = True,
+    cache: ShopCiderScanCache | None = None,
 ) -> list[str]:
     candidates: list[str | None] = []
 
@@ -939,7 +1054,13 @@ def _image_candidates_for_product(
         # The listing page can give a flat product cutout while the product detail
         # page usually contains more gallery options. Pull a few detail-page images
         # and let the selected image mode choose the strongest image.
-        candidates.extend(_image_candidates_from_product_page(product.get("merchant_url"), timeout_seconds=timeout_seconds))
+        candidates.extend(
+            _image_candidates_from_product_page(
+                product.get("merchant_url"),
+                timeout_seconds=timeout_seconds,
+                cache=cache,
+            )
+        )
 
     return _dedupe_strings(candidates)[:MAX_IMAGE_CANDIDATES_PER_PRODUCT]
 
@@ -950,6 +1071,7 @@ def build_shopcider_candidate_payloads(options: CollectionScanOptions) -> list[C
     clean_source_url = _clean_source_url(options.source_url)
 
     image_mode = _normalize_image_mode(options.image_mode)
+    scan_cache = ShopCiderScanCache()
 
     for product in products:
         title = str(product.get("title") or "").strip()
@@ -977,12 +1099,14 @@ def build_shopcider_candidate_payloads(options: CollectionScanOptions) -> list[C
             clean_source_url,
             timeout_seconds=options.request_timeout_seconds,
             include_product_page=image_mode != IMAGE_MODE_FAST,
+            cache=scan_cache,
         )
         if image_mode == IMAGE_MODE_FAST:
             image_url = _first_verified_shopcider_image_url(
                 image_candidates,
                 clean_source_url,
                 timeout_seconds=options.request_timeout_seconds,
+                cache=scan_cache,
             )
         else:
             image_url = _best_verified_shopcider_image_url(
@@ -990,6 +1114,7 @@ def build_shopcider_candidate_payloads(options: CollectionScanOptions) -> list[C
                 clean_source_url,
                 timeout_seconds=options.request_timeout_seconds,
                 require_model=image_mode == IMAGE_MODE_MODEL_ONLY,
+                cache=scan_cache,
             )
 
         if not image_url:
