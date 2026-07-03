@@ -31,6 +31,7 @@ class CollectionScanOptions:
     limit: int = 30
     request_timeout_seconds: int = 20
     image_mode: str = "smart"
+    scan_run_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,7 @@ class CandidatePayload:
     source: str
     source_type: str
     source_url: str
+    scan_run_id: str | None
     merchant_name: str
     brand_name: str | None
     external_product_id: str
@@ -254,6 +256,7 @@ def build_candidate_payloads(options: CollectionScanOptions) -> list[CandidatePa
                 source=options.source,
                 source_type=options.source_type,
                 source_url=clean_source_url,
+                scan_run_id=options.scan_run_id,
                 merchant_name=options.merchant_name,
                 brand_name=product.get("vendor") or options.merchant_name,
                 external_product_id=external_id,
@@ -356,6 +359,7 @@ def upsert_product_candidates(db: Session, payloads: list[CandidatePayload]) -> 
 
         record.source_type = payload.source_type
         record.source_url = payload.source_url
+        record.scan_run_id = payload.scan_run_id
         record.merchant_name = payload.merchant_name
         record.brand_name = payload.brand_name
         record.title = payload.title
@@ -387,6 +391,7 @@ def scan_and_save_shopify_collection(db: Session, options: CollectionScanOptions
     return {
         "status": "ok",
         "source_url": _clean_collection_source_url(options.source_url),
+        "scan_run_id": options.scan_run_id,
         "merchant_name": options.merchant_name,
         "target_city_slug": options.target_city_slug,
         "image_mode": options.image_mode,

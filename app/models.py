@@ -318,6 +318,7 @@ class ProductCandidate(Base):
     source = Column(String(50), nullable=False, index=True)
     source_type = Column(String(50), nullable=False, default="collection")
     source_url = Column(Text, nullable=False)
+    scan_run_id = Column(String(64), nullable=True, index=True)
 
     merchant_name = Column(String(255), nullable=False, index=True)
     brand_name = Column(String(255), nullable=True)

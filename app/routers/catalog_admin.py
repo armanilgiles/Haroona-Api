@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Literal
 from urllib.parse import urlparse, urlunparse
+from uuid import uuid4
 from pydantic import BaseModel, Field
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func
@@ -222,6 +223,7 @@ def _apply_candidate_source_filters(
     *,
     merchant_name: str | None = None,
     source_url: str | None = None,
+    scan_run_id: str | None = None,
 ):
     cleaned_merchant = _clean_text(merchant_name)
     if cleaned_merchant:
@@ -230,6 +232,10 @@ def _apply_candidate_source_filters(
     cleaned_source_url = _clean_source_url_for_filter(source_url)
     if cleaned_source_url:
         query = query.filter(ProductCandidate.source_url == cleaned_source_url)
+
+    cleaned_scan_run_id = _clean_text(scan_run_id)
+    if cleaned_scan_run_id:
+        query = query.filter(ProductCandidate.scan_run_id == cleaned_scan_run_id)
 
     return query
 
@@ -261,6 +267,7 @@ def _brand_asset_payload(
     latest_candidate_id: int | None,
     latest_candidate_title: str | None,
     latest_source_url: str | None,
+    latest_scan_run_id: str | None = None,
 ) -> dict:
     logo_url = _clean_text(brand.logo_url if brand else None)
     country = city.country
@@ -279,6 +286,7 @@ def _brand_asset_payload(
         "latest_candidate_id": latest_candidate_id,
         "latest_candidate_title": latest_candidate_title,
         "latest_source_url": latest_source_url,
+        "latest_scan_run_id": latest_scan_run_id,
     }
 
 
@@ -289,6 +297,7 @@ def list_brand_assets(
     source: str | None = Query(None),
     merchant_name: str | None = Query(None),
     source_url: str | None = Query(None),
+    scan_run_id: str | None = Query(None),
     limit: int = Query(100, ge=1, le=500),
     db: Session = Depends(get_db),
 ):
@@ -311,6 +320,7 @@ def list_brand_assets(
         query,
         merchant_name=merchant_name,
         source_url=source_url,
+        scan_run_id=scan_run_id,
     )
 
     rows = query.limit(limit).all()
@@ -337,6 +347,7 @@ def list_brand_assets(
                 "latest_candidate_id": None,
                 "latest_candidate_title": None,
                 "latest_source_url": None,
+                "latest_scan_run_id": None,
             },
         )
         group["candidate_count"] += 1
@@ -344,6 +355,7 @@ def list_brand_assets(
             group["latest_candidate_id"] = row.id
             group["latest_candidate_title"] = row.title
             group["latest_source_url"] = row.source_url
+            group["latest_scan_run_id"] = row.scan_run_id
 
     items: list[dict] = []
     for group in grouped.values():
@@ -359,6 +371,7 @@ def list_brand_assets(
                 latest_candidate_id=group["latest_candidate_id"],
                 latest_candidate_title=group["latest_candidate_title"],
                 latest_source_url=group["latest_source_url"],
+                latest_scan_run_id=group.get("latest_scan_run_id"),
             )
         )
 
@@ -404,6 +417,7 @@ def resolve_brand_asset(
             latest_candidate_id=None,
             latest_candidate_title=None,
             latest_source_url=None,
+            latest_scan_run_id=None,
         ),
     }
 
@@ -415,6 +429,7 @@ def scan_collection(
 ):
     try:
         scanner = detect_curation_scanner(payload.source_url)
+        scan_run_id = f"scan_{uuid4().hex}"
         options = CollectionScanOptions(
             source_url=payload.source_url,
             merchant_name=payload.merchant_name,
@@ -424,11 +439,13 @@ def scan_collection(
             source_type=scanner.source_type,
             limit=payload.limit,
             image_mode=payload.image_mode,
+            scan_run_id=scan_run_id,
         )
 
         result = scanner.scan(db, options)
         return {
             **result,
+            "scan_run_id": result.get("scan_run_id") or scan_run_id,
             "scanner": scanner.name,
             "detected_source": scanner.source,
             "detected_source_type": scanner.source_type,
@@ -446,6 +463,7 @@ def list_product_candidates(
     target_city_slug: str | None = Query(None),
     merchant_name: str | None = Query(None),
     source_url: str | None = Query(None),
+    scan_run_id: str | None = Query(None),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -471,6 +489,7 @@ def list_product_candidates(
         query,
         merchant_name=merchant_name,
         source_url=source_url,
+        scan_run_id=scan_run_id,
     )
 
     rows = query.offset(offset).limit(limit).all()
@@ -487,6 +506,7 @@ def list_product_candidates(
                 "source": row.source,
                 "source_type": row.source_type,
                 "source_url": row.source_url,
+                "scan_run_id": row.scan_run_id,
                 "merchant_name": row.merchant_name,
                 "brand_name": row.brand_name,
                 "external_product_id": row.external_product_id,
