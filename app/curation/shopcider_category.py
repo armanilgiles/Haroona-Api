@@ -24,6 +24,7 @@ from app.curation.shopify_collection import (
     USER_AGENT,
     CandidatePayload,
     CollectionScanOptions,
+    build_scan_summary,
     _normalize_category,
     _parse_decimal,
     _strip_html,
@@ -49,6 +50,15 @@ MODEL_WORN_SCORE_THRESHOLD = 42
 class ImageCandidateChoice:
     url: str
     score: int
+
+
+@dataclass(frozen=True)
+class ShopCiderBuildResult:
+    payloads: list[CandidatePayload]
+    discovered_count: int
+    skipped_invalid_products: int
+    skipped_missing_images: int
+    skipped_due_to_limit: int
 
 
 @dataclass
@@ -1065,10 +1075,12 @@ def _image_candidates_for_product(
     return _dedupe_strings(candidates)[:MAX_IMAGE_CANDIDATES_PER_PRODUCT]
 
 
-def build_shopcider_candidate_payloads(options: CollectionScanOptions) -> list[CandidatePayload]:
+def build_shopcider_candidate_payload_result(options: CollectionScanOptions) -> ShopCiderBuildResult:
     products = fetch_shopcider_category_products(options)
     payloads: list[CandidatePayload] = []
     clean_source_url = _clean_source_url(options.source_url)
+    skipped_invalid_products = 0
+    skipped_missing_images = 0
 
     image_mode = _normalize_image_mode(options.image_mode)
     scan_cache = ShopCiderScanCache()
@@ -1077,6 +1089,7 @@ def build_shopcider_candidate_payloads(options: CollectionScanOptions) -> list[C
         title = str(product.get("title") or "").strip()
         external_id = str(product.get("external_product_id") or "").strip()
         if not title or not external_id:
+            skipped_invalid_products += 1
             continue
 
         description = product.get("description")
@@ -1122,6 +1135,7 @@ def build_shopcider_candidate_payloads(options: CollectionScanOptions) -> list[C
             # If the CDN URL cannot be loaded server-side, skip the candidate
             # instead of saving a row that will render as a broken thumbnail.
             # Model-only mode also skips products when no model-looking image is found.
+            skipped_missing_images += 1
             continue
 
         review_notes: list[str] = []
@@ -1160,12 +1174,37 @@ def build_shopcider_candidate_payloads(options: CollectionScanOptions) -> list[C
         )
 
     payloads.sort(key=lambda item: item.haroona_score, reverse=True)
-    return payloads[: options.limit]
+    limited_payloads = payloads[: options.limit]
+
+    return ShopCiderBuildResult(
+        payloads=limited_payloads,
+        discovered_count=len(products),
+        skipped_invalid_products=skipped_invalid_products,
+        skipped_missing_images=skipped_missing_images,
+        skipped_due_to_limit=max(len(payloads) - len(limited_payloads), 0),
+    )
+
+
+def build_shopcider_candidate_payloads(options: CollectionScanOptions) -> list[CandidatePayload]:
+    return build_shopcider_candidate_payload_result(options).payloads
 
 
 def scan_and_save_shopcider_category(db: Session, options: CollectionScanOptions) -> dict[str, Any]:
-    payloads = build_shopcider_candidate_payloads(options)
+    build_result = build_shopcider_candidate_payload_result(options)
+    payloads = build_result.payloads
     counts = upsert_product_candidates(db, payloads)
+    summary = build_scan_summary(
+        requested_limit=options.limit,
+        discovered_count=build_result.discovered_count,
+        selected_count=len(payloads),
+        created_count=counts["created"],
+        updated_count=counts["updated"],
+        skipped_duplicates=counts["skipped_duplicates"],
+        skipped_missing_images=build_result.skipped_missing_images,
+        skipped_invalid_products=build_result.skipped_invalid_products,
+        skipped_due_to_limit=build_result.skipped_due_to_limit,
+        image_mode=_normalize_image_mode(options.image_mode),
+    )
     return {
         "status": "ok",
         "source_url": _clean_source_url(options.source_url),
@@ -1175,6 +1214,7 @@ def scan_and_save_shopcider_category(db: Session, options: CollectionScanOptions
         "image_mode": _normalize_image_mode(options.image_mode),
         "found": len(payloads),
         **counts,
+        "summary": summary,
         "items": [
             {
                 "external_product_id": item.external_product_id,
