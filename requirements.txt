@@ -17,3 +17,4 @@ typing_extensions==4.15.0
 uvicorn==0.40.0
 psycopg2-binary==2.9.10
 alembic==1.18.4
+Pillow==11.3.0
