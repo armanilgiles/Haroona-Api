@@ -13,10 +13,12 @@ from app.curation.shopify_collection import CollectionScanOptions, scan_and_save
 ScanFunction = Callable[[Session, CollectionScanOptions], dict[str, Any]]
 
 _SHOPCIDER_CATEGORY_PATTERN = re.compile(r"^/category/[^/?#]+-cid-\d+/?$", re.IGNORECASE)
+_SHOPCIDER_COLLECTION_PATTERN = re.compile(r"^/collection/[^/?#]+/?$", re.IGNORECASE)
 
 SUPPORTED_SCANNER_EXAMPLES = (
     "Shopify collection URL containing /collections/{handle}",
     "ShopCider category URL like https://www.shopcider.com/category/maxi-dresses-cid-3587",
+    "ShopCider collection URL like https://www.shopcider.com/collection/top",
 )
 
 
@@ -71,9 +73,16 @@ def detect_curation_scanner(source_url: str) -> ScannerMatch:
                 source_type="category",
                 scan=scan_and_save_shopcider_category,
             )
+        if _SHOPCIDER_COLLECTION_PATTERN.match(path):
+            return ScannerMatch(
+                name="shopcider_collection",
+                source="shopcider",
+                source_type="collection",
+                scan=scan_and_save_shopcider_category,
+            )
         raise UnsupportedScannerError(
             source_url,
-            "ShopCider is supported only for /category/{slug}-cid-{id} pages right now.",
+            "ShopCider is supported for /category/{slug}-cid-{id} and /collection/{slug} pages.",
         )
 
     if "/collections/" in path:
