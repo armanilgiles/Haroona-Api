@@ -38,6 +38,11 @@ GOODS_ID_PATTERN = re.compile(r"(?:-|/)(\d{6,})(?:$|[/?#])")
 SCRIPT_PATTERN = re.compile(r"<script[^>]*>(.*?)</script>", re.IGNORECASE | re.DOTALL)
 MAX_IMAGE_CANDIDATES_PER_PRODUCT = 10
 MAX_IMAGE_PREVIEW_BYTES = 900_000
+IMAGE_MODE_FAST = "fast"
+IMAGE_MODE_SMART = "smart"
+IMAGE_MODE_MODEL_ONLY = "model_only"
+SUPPORTED_IMAGE_MODES = {IMAGE_MODE_FAST, IMAGE_MODE_SMART, IMAGE_MODE_MODEL_ONLY}
+MODEL_WORN_SCORE_THRESHOLD = 42
 
 
 @dataclass(frozen=True)
@@ -435,10 +440,42 @@ def _shopcider_image_hint_score(image_url: str) -> int:
     return score
 
 
+def _normalize_image_mode(image_mode: str | None) -> str:
+    normalized = (image_mode or IMAGE_MODE_SMART).strip().lower().replace("-", "_")
+    if normalized in {"model", "model_only", "strict", "strict_model"}:
+        return IMAGE_MODE_MODEL_ONLY
+    if normalized not in SUPPORTED_IMAGE_MODES:
+        return IMAGE_MODE_SMART
+    return normalized
+
+
+def _first_verified_shopcider_image_url(
+    image_urls: list[str | None],
+    base_url: str,
+    timeout_seconds: int = 6,
+) -> str | None:
+    candidates: list[str] = []
+    for image_url in image_urls:
+        for candidate in _shopcider_image_url_candidates(image_url, base_url):
+            if candidate not in candidates:
+                candidates.append(candidate)
+            if len(candidates) >= MAX_IMAGE_CANDIDATES_PER_PRODUCT:
+                break
+        if len(candidates) >= MAX_IMAGE_CANDIDATES_PER_PRODUCT:
+            break
+
+    for candidate in candidates:
+        if _image_url_loads(candidate, timeout_seconds=timeout_seconds):
+            return candidate
+
+    return None
+
+
 def _best_verified_shopcider_image_url(
     image_urls: list[str | None],
     base_url: str,
     timeout_seconds: int = 6,
+    require_model: bool = False,
 ) -> str | None:
     candidates: list[str] = []
     for image_url in image_urls:
@@ -460,7 +497,13 @@ def _best_verified_shopcider_image_url(
         if best_choice is None or score > best_choice.score:
             best_choice = ImageCandidateChoice(url=candidate, score=score)
 
-    return best_choice.url if best_choice else None
+    if not best_choice:
+        return None
+
+    if require_model and best_choice.score < MODEL_WORN_SCORE_THRESHOLD:
+        return None
+
+    return best_choice.url
 
 
 def _verified_shopcider_image_url(
@@ -882,6 +925,7 @@ def _image_candidates_for_product(
     product: dict[str, Any],
     base_url: str,
     timeout_seconds: int = 6,
+    include_product_page: bool = True,
 ) -> list[str]:
     candidates: list[str | None] = []
 
@@ -891,10 +935,11 @@ def _image_candidates_for_product(
 
     candidates.append(str(product.get("image_url") or ""))
 
-    # The listing page can give a flat product cutout while the product detail
-    # page usually contains more gallery options. Pull a few detail-page images
-    # and let the model-worn preference score choose the strongest image.
-    candidates.extend(_image_candidates_from_product_page(product.get("merchant_url"), timeout_seconds=timeout_seconds))
+    if include_product_page:
+        # The listing page can give a flat product cutout while the product detail
+        # page usually contains more gallery options. Pull a few detail-page images
+        # and let the selected image mode choose the strongest image.
+        candidates.extend(_image_candidates_from_product_page(product.get("merchant_url"), timeout_seconds=timeout_seconds))
 
     return _dedupe_strings(candidates)[:MAX_IMAGE_CANDIDATES_PER_PRODUCT]
 
@@ -903,6 +948,8 @@ def build_shopcider_candidate_payloads(options: CollectionScanOptions) -> list[C
     products = fetch_shopcider_category_products(options)
     payloads: list[CandidatePayload] = []
     clean_source_url = _clean_source_url(options.source_url)
+
+    image_mode = _normalize_image_mode(options.image_mode)
 
     for product in products:
         title = str(product.get("title") or "").strip()
@@ -925,19 +972,31 @@ def build_shopcider_candidate_payloads(options: CollectionScanOptions) -> list[C
             merchant_name=options.merchant_name,
         )
 
-        image_url = _best_verified_shopcider_image_url(
-            _image_candidates_for_product(
-                product,
-                clean_source_url,
-                timeout_seconds=options.request_timeout_seconds,
-            ),
+        image_candidates = _image_candidates_for_product(
+            product,
             clean_source_url,
             timeout_seconds=options.request_timeout_seconds,
+            include_product_page=image_mode != IMAGE_MODE_FAST,
         )
+        if image_mode == IMAGE_MODE_FAST:
+            image_url = _first_verified_shopcider_image_url(
+                image_candidates,
+                clean_source_url,
+                timeout_seconds=options.request_timeout_seconds,
+            )
+        else:
+            image_url = _best_verified_shopcider_image_url(
+                image_candidates,
+                clean_source_url,
+                timeout_seconds=options.request_timeout_seconds,
+                require_model=image_mode == IMAGE_MODE_MODEL_ONLY,
+            )
+
         if not image_url:
             # Product imagery is required for the Curate Studio review queue.
             # If the CDN URL cannot be loaded server-side, skip the candidate
             # instead of saving a row that will render as a broken thumbnail.
+            # Model-only mode also skips products when no model-looking image is found.
             continue
 
         review_notes: list[str] = []
@@ -986,6 +1045,7 @@ def scan_and_save_shopcider_category(db: Session, options: CollectionScanOptions
         "source_url": _clean_source_url(options.source_url),
         "merchant_name": options.merchant_name,
         "target_city_slug": options.target_city_slug,
+        "image_mode": _normalize_image_mode(options.image_mode),
         "found": len(payloads),
         **counts,
         "items": [
