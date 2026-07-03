@@ -302,7 +302,7 @@ def upsert_product_candidates(db: Session, payloads: list[CandidatePayload]) -> 
         record.currency = payload.currency
         record.affiliate_url = payload.affiliate_url
         record.merchant_url = payload.merchant_url
-        record.image_url = payload.image_url
+        record.image_url = payload.image_url or record.image_url
         record.availability = payload.availability
         record.normalized_category = payload.normalized_category
         record.target_city_slug = payload.target_city_slug

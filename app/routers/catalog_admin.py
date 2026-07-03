@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from urllib.parse import urlparse, urlunparse
 from pydantic import BaseModel, Field
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func
@@ -202,6 +203,35 @@ def _clean_text(value: str | None) -> str | None:
     return cleaned or None
 
 
+def _clean_source_url_for_filter(source_url: str | None) -> str | None:
+    cleaned = _clean_text(source_url)
+    if not cleaned:
+        return None
+
+    parsed = urlparse(cleaned)
+    if not parsed.scheme or not parsed.netloc:
+        return cleaned
+
+    return urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
+
+
+def _apply_candidate_source_filters(
+    query,
+    *,
+    merchant_name: str | None = None,
+    source_url: str | None = None,
+):
+    cleaned_merchant = _clean_text(merchant_name)
+    if cleaned_merchant:
+        query = query.filter(func.lower(ProductCandidate.merchant_name) == cleaned_merchant.lower())
+
+    cleaned_source_url = _clean_source_url_for_filter(source_url)
+    if cleaned_source_url:
+        query = query.filter(ProductCandidate.source_url == cleaned_source_url)
+
+    return query
+
+
 def _brand_lookup_name(candidate: ProductCandidate) -> str:
     return (
         _clean_text(candidate.brand_name)
@@ -255,6 +285,8 @@ def list_brand_assets(
     target_city_slug: str | None = Query(None),
     status: str | None = Query(None),
     source: str | None = Query(None),
+    merchant_name: str | None = Query(None),
+    source_url: str | None = Query(None),
     limit: int = Query(100, ge=1, le=500),
     db: Session = Depends(get_db),
 ):
@@ -273,6 +305,11 @@ def list_brand_assets(
         query = query.filter(ProductCandidate.review_status != "archived")
     if source:
         query = query.filter(ProductCandidate.source == source)
+    query = _apply_candidate_source_filters(
+        query,
+        merchant_name=merchant_name,
+        source_url=source_url,
+    )
 
     rows = query.limit(limit).all()
     city_slugs = sorted({row.target_city_slug for row in rows})
@@ -404,6 +441,8 @@ def list_product_candidates(
     status: str | None = Query("pending"),
     source: str | None = Query(None),
     target_city_slug: str | None = Query(None),
+    merchant_name: str | None = Query(None),
+    source_url: str | None = Query(None),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -425,6 +464,11 @@ def list_product_candidates(
         query = query.filter(ProductCandidate.source == source)
     if target_city_slug:
         query = query.filter(ProductCandidate.target_city_slug == target_city_slug)
+    query = _apply_candidate_source_filters(
+        query,
+        merchant_name=merchant_name,
+        source_url=source_url,
+    )
 
     rows = query.offset(offset).limit(limit).all()
     product_ids = [row.promoted_product_id for row in rows if row.promoted_product_id]

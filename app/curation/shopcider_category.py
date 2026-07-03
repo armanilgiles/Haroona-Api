@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import base64
 import json
 import re
 from decimal import Decimal
 from html.parser import HTMLParser
 from typing import Any
-from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
+from urllib.parse import parse_qs, unquote, urlencode, urljoin, urlparse, urlunparse
 
 import requests
 from sqlalchemy.orm import Session
@@ -24,6 +25,7 @@ from app.curation.shopify_collection import (
 
 PRICE_PATTERN = re.compile(r"\$\s*([0-9][0-9,]*(?:\.\d{2})?)")
 CATEGORY_ID_PATTERN = re.compile(r"/category/[^/?#]*-cid-(\d+)", re.IGNORECASE)
+COLLECTION_PATTERN = re.compile(r"/collection/[^/?#]+/?$", re.IGNORECASE)
 GOODS_ID_PATTERN = re.compile(r"(?:-|/)(\d{6,})(?:$|[/?#])")
 SCRIPT_PATTERN = re.compile(r"<script[^>]*>(.*?)</script>", re.IGNORECASE | re.DOTALL)
 
@@ -53,10 +55,9 @@ class _ProductAnchorParser(HTMLParser):
             return
 
         if self._anchor_stack and tag.lower() in {"img", "source"}:
-            src = attr_map.get("src") or attr_map.get("data-src") or attr_map.get("srcset")
+            src = _first_image_attribute(attr_map)
             if src and not self._anchor_stack[-1].get("image_url"):
-                first_src = src.split(",")[0].strip().split(" ")[0]
-                self._anchor_stack[-1]["image_url"] = urljoin(self.base_url, first_src)
+                self._anchor_stack[-1]["image_url"] = _normalize_image_url(src, self.base_url)
 
     def handle_data(self, data: str) -> None:
         if self._anchor_stack:
@@ -82,17 +83,26 @@ def _clean_source_url(source_url: str) -> str:
     return urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
 
 
-def _is_shopcider_category_url(source_url: str) -> bool:
+def _is_shopcider_listing_url(source_url: str) -> bool:
     parsed = urlparse(source_url)
     host = parsed.netloc.lower()
-    return "shopcider.com" in host and CATEGORY_ID_PATTERN.search(parsed.path) is not None
+    path = parsed.path
+    return "shopcider.com" in host and (
+        CATEGORY_ID_PATTERN.search(path) is not None or COLLECTION_PATTERN.search(path) is not None
+    )
 
 
-def _category_id_from_url(source_url: str) -> str:
-    match = CATEGORY_ID_PATTERN.search(urlparse(source_url).path)
-    if not match:
-        raise ValueError("ShopCider URL must look like /category/{slug}-cid-{id}")
-    return match.group(1)
+def _shopcider_listing_label(source_url: str) -> str:
+    parsed = urlparse(source_url)
+    category_match = CATEGORY_ID_PATTERN.search(parsed.path)
+    if category_match:
+        return f"category {category_match.group(1)}"
+
+    collection_match = COLLECTION_PATTERN.search(parsed.path)
+    if collection_match:
+        return f"collection {parsed.path.rstrip('/').split('/')[-1]}"
+
+    return parsed.path or source_url
 
 
 def _looks_like_shopcider_product_url(href: str) -> bool:
@@ -100,6 +110,183 @@ def _looks_like_shopcider_product_url(href: str) -> bool:
         return False
     parsed = urlparse(href)
     return "/goods/" in parsed.path.lower() or "/product/" in parsed.path.lower()
+
+
+def _first_image_attribute(attr_map: dict[str, str]) -> str | None:
+    for key in (
+        "src",
+        "data-src",
+        "data-original",
+        "data-lazy",
+        "data-lazy-src",
+        "data-srcset",
+        "srcset",
+        "data-image",
+        "data-url",
+        "poster",
+        "content",
+    ):
+        value = attr_map.get(key)
+        if value and _looks_like_image_url(value):
+            return value.split(",")[0].strip().split(" ")[0]
+    return None
+
+
+def _decode_business_tracking(raw_value: str | None) -> dict[str, Any] | None:
+    if not raw_value:
+        return None
+
+    decoded_value = unquote(raw_value).strip()
+
+    # Some ShopCider listing links leave raw + characters inside the
+    # businessTracking query param. parse_qs treats + as a space, which breaks
+    # normal base64 decoding and caused skcFirstImg to be missed. Convert those
+    # spaces back before decoding.
+    decoded_value = decoded_value.replace(" ", "+")
+    padding = "=" * (-len(decoded_value) % 4)
+
+    try:
+        decoded_json = base64.b64decode(decoded_value + padding).decode("utf-8")
+        payload = json.loads(decoded_json)
+    except Exception:
+        try:
+            decoded_json = base64.urlsafe_b64decode(decoded_value + padding).decode("utf-8")
+            payload = json.loads(decoded_json)
+        except Exception:
+            return None
+
+    return payload if isinstance(payload, dict) else None
+
+
+def _normalize_image_url(value: str | None, base_url: str) -> str | None:
+    if not value:
+        return None
+
+    cleaned = value.strip().strip('"\'')
+    if not cleaned:
+        return None
+
+    first_src = cleaned.split(",")[0].strip().split(" ")[0]
+    if not _looks_like_image_url(first_src):
+        return None
+
+    if first_src.startswith("//"):
+        return f"https:{first_src}"
+    if first_src.startswith("http://") or first_src.startswith("https://"):
+        return first_src
+    if first_src.startswith("/"):
+        return urljoin(base_url, first_src)
+
+    # ShopCider listing links often hide the first image filename inside the
+    # businessTracking query param as skcFirstImg. A bare filename needs the
+    # ShopCider product image CDN prefix to render in Curate Studio.
+    if re.fullmatch(r"[A-Za-z0-9_.-]+\.(?:jpg|jpeg|png|webp)", first_src, re.IGNORECASE):
+        return f"https://img1.shopcider.com/product/{first_src}"
+
+    return urljoin(base_url, first_src)
+
+
+def _image_from_tracking_query(merchant_url: str, base_url: str) -> str | None:
+    parsed = urlparse(merchant_url)
+    query = parse_qs(parsed.query)
+
+    tracking = _decode_business_tracking(query.get("businessTracking", [None])[0])
+    if not tracking:
+        return None
+
+    for key in ("skcFirstImg", "firstImage", "first_image", "image", "imageUrl", "image_url"):
+        image_url = _normalize_image_url(str(tracking.get(key) or ""), base_url)
+        if image_url:
+            return image_url
+
+    return None
+
+
+SHOPCIDER_IMAGE_HOSTS = ("img1.shopcider.com", "img.shopcider.com", "img2.shopcider.com")
+
+
+def _shopcider_image_url_candidates(image_url: str | None, base_url: str) -> list[str]:
+    normalized = _normalize_image_url(image_url, base_url)
+    if not normalized:
+        return []
+
+    candidates: list[str] = []
+
+    def add(candidate: str) -> None:
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+
+    add(normalized)
+
+    parsed = urlparse(normalized)
+    if parsed.scheme in {"http", "https"} and "shopcider.com" in parsed.netloc.lower():
+        for host in SHOPCIDER_IMAGE_HOSTS:
+            add(urlunparse((parsed.scheme, host, parsed.path, parsed.params, parsed.query, parsed.fragment)))
+            add(urlunparse((parsed.scheme, host, parsed.path, parsed.params, "", parsed.fragment)))
+
+    return candidates
+
+
+def _response_has_image_content(response: requests.Response) -> bool:
+    if response.status_code >= 400:
+        return False
+
+    content_type = response.headers.get("Content-Type", "").lower()
+    return content_type.startswith("image/") or "image" in content_type
+
+
+def _bytes_look_like_image(chunk: bytes) -> bool:
+    return (
+        chunk.startswith(b"\xff\xd8")
+        or chunk.startswith(b"\x89PNG")
+        or chunk.startswith(b"RIFF") and b"WEBP" in chunk[:16]
+        or chunk.lstrip().startswith(b"<svg")
+    )
+
+
+def _image_url_loads(image_url: str, timeout_seconds: int = 6) -> bool:
+    timeout = min(max(float(timeout_seconds or 3), 1.5), 4.0)
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+        "Referer": "https://www.shopcider.com/",
+    }
+
+    try:
+        head_response = requests.head(image_url, headers=headers, allow_redirects=True, timeout=timeout)
+        if _response_has_image_content(head_response):
+            return True
+        if head_response.status_code >= 400 and head_response.status_code not in {403, 405, 406}:
+            return False
+    except requests.RequestException:
+        pass
+
+    try:
+        get_headers = {**headers, "Range": "bytes=0-2047"}
+        with requests.get(image_url, headers=get_headers, stream=True, timeout=timeout) as response:
+            if _response_has_image_content(response):
+                return True
+            if response.status_code >= 400:
+                return False
+
+            for chunk in response.iter_content(chunk_size=64):
+                if chunk:
+                    return _bytes_look_like_image(chunk)
+    except requests.RequestException:
+        return False
+
+    return False
+
+
+def _verified_shopcider_image_url(
+    image_url: str | None,
+    base_url: str,
+    timeout_seconds: int = 6,
+) -> str | None:
+    for candidate in _shopcider_image_url_candidates(image_url, base_url):
+        if _image_url_loads(candidate, timeout_seconds=timeout_seconds):
+            return candidate
+    return None
 
 
 def _extract_external_product_id(merchant_url: str, fallback: str) -> str:
@@ -165,6 +352,7 @@ def _candidate_from_anchor_text(
     if len(title) < 4:
         return None
 
+    image_url = image_url or _image_from_tracking_query(href, href)
     clean_url = _clean_product_url(href)
     return {
         "external_product_id": _extract_external_product_id(clean_url, fallback=title.lower().replace(" ", "-")),
@@ -226,22 +414,35 @@ def _image_from_record(record: dict[str, Any], base_url: str) -> str | None:
             "main_image",
             "firstImage",
             "first_image",
+            "skcFirstImg",
+            "skuFirstImg",
             "goodsImg",
             "goods_img",
+            "goodsImage",
+            "goods_image",
+            "productImage",
+            "product_image",
             "cover",
             "coverUrl",
+            "cover_url",
+            "pic",
+            "picUrl",
+            "pic_url",
             "url",
         ),
     )
-    if direct and _looks_like_image_url(direct):
-        return urljoin(base_url, direct)
+    image_url = _normalize_image_url(direct, base_url)
+    if image_url:
+        return image_url
 
-    for key in ("images", "imageList", "skuList", "skus"):
+    for key in ("images", "imageList", "image_list", "gallery", "galleryImages", "skuList", "skus", "colorList"):
         value = record.get(key)
         if isinstance(value, list):
             for item in value:
-                if isinstance(item, str) and _looks_like_image_url(item):
-                    return urljoin(base_url, item)
+                if isinstance(item, str):
+                    image_url = _normalize_image_url(item, base_url)
+                    if image_url:
+                        return image_url
                 if isinstance(item, dict):
                     image_url = _image_from_record(item, base_url)
                     if image_url:
@@ -308,6 +509,8 @@ def _candidate_from_record(record: dict[str, Any], base_url: str) -> dict[str, A
     description = _strip_html(_first_string(record, ("description", "desc", "subtitle")))
     product_type = _first_string(record, ("categoryName", "category_name", "type", "productType", "product_type"))
 
+    image_url = _image_from_record(record, base_url) or _image_from_tracking_query(merchant_url, base_url)
+
     return {
         "external_product_id": str(external_id),
         "title": title,
@@ -315,7 +518,7 @@ def _candidate_from_record(record: dict[str, Any], base_url: str) -> dict[str, A
         "price_amount": price_amount,
         "currency": "USD",
         "merchant_url": merchant_url,
-        "image_url": _image_from_record(record, base_url),
+        "image_url": image_url,
         "availability": "in_stock",
         "product_type": product_type,
         "tags": [tag for tag in tags if tag and tag != "None"],
@@ -408,8 +611,11 @@ def _extract_items_from_anchors(html: str, base_url: str) -> list[dict[str, Any]
 
 def fetch_shopcider_category_products(options: CollectionScanOptions) -> list[dict[str, Any]]:
     source_url = _clean_source_url(options.source_url)
-    if not _is_shopcider_category_url(source_url):
-        raise ValueError("ShopCider URL must look like https://www.shopcider.com/category/{slug}-cid-{id}")
+    if not _is_shopcider_listing_url(source_url):
+        raise ValueError(
+            "ShopCider URL must look like https://www.shopcider.com/category/{slug}-cid-{id} "
+            "or https://www.shopcider.com/collection/{slug}"
+        )
 
     headers = {
         "User-Agent": USER_AGENT,
@@ -426,10 +632,10 @@ def fetch_shopcider_category_products(options: CollectionScanOptions) -> list[di
         items = _extract_items_from_anchors(html, source_url)
 
     if not items:
-        category_id = _category_id_from_url(source_url)
+        listing_label = _shopcider_listing_label(source_url)
         raise RuntimeError(
-            f"Could not find product cards on ShopCider category {category_id}. "
-            "The page markup may have changed or the category may require browser rendering."
+            f"Could not find product cards on ShopCider {listing_label}. "
+            "The page markup may have changed or the listing may require browser rendering."
         )
 
     return items
@@ -461,9 +667,18 @@ def build_shopcider_candidate_payloads(options: CollectionScanOptions) -> list[C
             merchant_name=options.merchant_name,
         )
 
+        image_url = _verified_shopcider_image_url(
+            str(product.get("image_url") or ""),
+            clean_source_url,
+            timeout_seconds=options.request_timeout_seconds,
+        )
+        if not image_url:
+            # Product imagery is required for the Curate Studio review queue.
+            # If the CDN URL cannot be loaded server-side, skip the candidate
+            # instead of saving a row that will render as a broken thumbnail.
+            continue
+
         review_notes: list[str] = []
-        if not product.get("image_url"):
-            review_notes.append("missing image")
         if product.get("price_amount") is None:
             review_notes.append("missing price")
         if product.get("availability") != "in_stock":
@@ -474,7 +689,7 @@ def build_shopcider_candidate_payloads(options: CollectionScanOptions) -> list[C
         payloads.append(
             CandidatePayload(
                 source="shopcider",
-                source_type="category",
+                source_type=options.source_type or "category",
                 source_url=clean_source_url,
                 merchant_name=options.merchant_name,
                 brand_name=product.get("brand_name") or options.merchant_name,
@@ -485,7 +700,7 @@ def build_shopcider_candidate_payloads(options: CollectionScanOptions) -> list[C
                 currency=product.get("currency") or "USD",
                 affiliate_url=None,
                 merchant_url=product.get("merchant_url"),
-                image_url=product.get("image_url"),
+                image_url=image_url,
                 availability=product.get("availability") or "in_stock",
                 normalized_category=normalized_category,
                 target_city_slug=options.target_city_slug,
