@@ -30,6 +30,7 @@ class CollectionScanOptions:
     source_type: str = "collection"
     limit: int = 30
     request_timeout_seconds: int = 20
+    image_mode: str = "smart"
 
 
 @dataclass(frozen=True)
@@ -327,6 +328,7 @@ def scan_and_save_shopify_collection(db: Session, options: CollectionScanOptions
         "source_url": options.source_url,
         "merchant_name": options.merchant_name,
         "target_city_slug": options.target_city_slug,
+        "image_mode": options.image_mode,
         "found": len(payloads),
         **counts,
         "items": [

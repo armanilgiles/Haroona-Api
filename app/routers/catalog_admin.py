@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Literal
 from urllib.parse import urlparse, urlunparse
 from pydantic import BaseModel, Field
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -27,6 +28,7 @@ class CollectionScanRequest(BaseModel):
     source: str = Field("shopify", min_length=2)
     source_type: str = Field("collection", min_length=2)
     limit: int = Field(30, ge=1, le=100)
+    image_mode: Literal["fast", "smart", "model_only"] = "smart"
 
 
 class ReviewCandidateRequest(BaseModel):
@@ -421,6 +423,7 @@ def scan_collection(
             source=scanner.source,
             source_type=scanner.source_type,
             limit=payload.limit,
+            image_mode=payload.image_mode,
         )
 
         result = scanner.scan(db, options)
