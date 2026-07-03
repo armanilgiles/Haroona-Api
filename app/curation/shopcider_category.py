@@ -1137,6 +1137,7 @@ def build_shopcider_candidate_payloads(options: CollectionScanOptions) -> list[C
                 source="shopcider",
                 source_type=options.source_type or "category",
                 source_url=clean_source_url,
+                scan_run_id=options.scan_run_id,
                 merchant_name=options.merchant_name,
                 brand_name=product.get("brand_name") or options.merchant_name,
                 external_product_id=external_id,
@@ -1168,6 +1169,7 @@ def scan_and_save_shopcider_category(db: Session, options: CollectionScanOptions
     return {
         "status": "ok",
         "source_url": _clean_source_url(options.source_url),
+        "scan_run_id": options.scan_run_id,
         "merchant_name": options.merchant_name,
         "target_city_slug": options.target_city_slug,
         "image_mode": _normalize_image_mode(options.image_mode),
