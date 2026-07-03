@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from urllib.parse import urlparse
-
 from pydantic import BaseModel, Field
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func
@@ -14,8 +12,8 @@ from app.curation.product_candidate_publisher import (
     publish_approved_product_candidates,
     publish_product_candidate,
 )
-from app.curation.shopcider_category import scan_and_save_shopcider_category
-from app.curation.shopify_collection import CollectionScanOptions, scan_and_save_shopify_collection
+from app.curation.scanner_registry import detect_curation_scanner
+from app.curation.shopify_collection import CollectionScanOptions
 
 router = APIRouter(prefix="/admin/catalog", tags=["admin-catalog"])
 
@@ -377,25 +375,24 @@ def scan_collection(
     db: Session = Depends(get_db),
 ):
     try:
-        parsed = urlparse(payload.source_url.strip())
-        host = parsed.netloc.lower()
-        path = parsed.path.lower()
-        is_shopcider_category = "shopcider.com" in host and path.startswith("/category/")
-
+        scanner = detect_curation_scanner(payload.source_url)
         options = CollectionScanOptions(
             source_url=payload.source_url,
             merchant_name=payload.merchant_name,
             target_city_slug=payload.target_city_slug,
             normalized_category=payload.normalized_category,
-            source="shopcider" if is_shopcider_category else payload.source,
-            source_type="category" if is_shopcider_category else payload.source_type,
+            source=scanner.source,
+            source_type=scanner.source_type,
             limit=payload.limit,
         )
 
-        if is_shopcider_category:
-            return scan_and_save_shopcider_category(db, options)
-
-        return scan_and_save_shopify_collection(db, options)
+        result = scanner.scan(db, options)
+        return {
+            **result,
+            "scanner": scanner.name,
+            "detected_source": scanner.source,
+            "detected_source_type": scanner.source_type,
+        }
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
