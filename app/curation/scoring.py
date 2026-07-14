@@ -69,6 +69,10 @@ CATEGORY_KEYWORDS: dict[str, list[str]] = {
     "skirts": ["skirt"],
     "bottoms": ["trouser", "pant", "jean", "skirt", "short"],
     "co-ords": ["co-ord", "co ord", "set"],
+    "shoes": ["shoe", "sandal", "boot", "heel", "sneaker"],
+    "bags": ["bag", "purse", "tote"],
+    "accessories": ["accessory", "scarf", "belt", "hat", "sunglasses"],
+    "jewelry": ["necklace", "earring", "bracelet", "ring", "jewellery", "jewelry"],
 }
 
 

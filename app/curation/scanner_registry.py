@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.curation.shopcider_category import scan_and_save_shopcider_category
 from app.curation.shopify_collection import CollectionScanOptions, scan_and_save_shopify_collection
+from app.curation.source_scan_guardrails import get_scanner_image_capabilities
 
 ScanFunction = Callable[[Session, CollectionScanOptions], dict[str, Any]]
 
@@ -32,6 +33,13 @@ class ScannerMatch:
     source: str
     source_type: str
     scan: ScanFunction
+    supported_image_modes: tuple[str, ...]
+    default_image_mode: str
+
+    def resolve_image_mode(self, requested_mode: str) -> str:
+        if requested_mode in self.supported_image_modes:
+            return requested_mode
+        return self.default_image_mode
 
 
 class UnsupportedScannerError(ValueError):
@@ -67,18 +75,28 @@ def detect_curation_scanner(source_url: str) -> ScannerMatch:
 
     if _host_matches(host, "shopcider.com"):
         if _SHOPCIDER_CATEGORY_PATTERN.match(path):
+            supported_image_modes, default_image_mode = get_scanner_image_capabilities(
+                "shopcider_category"
+            )
             return ScannerMatch(
                 name="shopcider_category",
                 source="shopcider",
                 source_type="category",
                 scan=scan_and_save_shopcider_category,
+                supported_image_modes=supported_image_modes,
+                default_image_mode=default_image_mode,
             )
         if _SHOPCIDER_COLLECTION_PATTERN.match(path):
+            supported_image_modes, default_image_mode = get_scanner_image_capabilities(
+                "shopcider_collection"
+            )
             return ScannerMatch(
                 name="shopcider_collection",
                 source="shopcider",
                 source_type="collection",
                 scan=scan_and_save_shopcider_category,
+                supported_image_modes=supported_image_modes,
+                default_image_mode=default_image_mode,
             )
         raise UnsupportedScannerError(
             source_url,
@@ -86,11 +104,16 @@ def detect_curation_scanner(source_url: str) -> ScannerMatch:
         )
 
     if "/collections/" in path:
+        supported_image_modes, default_image_mode = get_scanner_image_capabilities(
+            "shopify_collection"
+        )
         return ScannerMatch(
             name="shopify_collection",
             source="shopify",
             source_type="collection",
             scan=scan_and_save_shopify_collection,
+            supported_image_modes=supported_image_modes,
+            default_image_mode=default_image_mode,
         )
 
     raise UnsupportedScannerError(source_url)

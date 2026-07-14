@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import Literal
 from urllib.parse import urlparse, urlunparse
 from uuid import uuid4
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -17,6 +17,11 @@ from app.curation.product_candidate_publisher import (
 )
 from app.curation.scanner_registry import UnsupportedScannerError, detect_curation_scanner
 from app.curation.shopify_collection import CollectionScanOptions
+from app.curation.source_scan_guardrails import (
+    clean_merchant_name,
+    get_merchant_source_guidance,
+    normalize_category_hint,
+)
 
 router = APIRouter(prefix="/admin/catalog", tags=["admin-catalog"])
 
@@ -30,6 +35,29 @@ class CollectionScanRequest(BaseModel):
     source_type: str = Field("collection", min_length=2)
     limit: int = Field(30, ge=1, le=100)
     image_mode: Literal["fast", "smart", "model_only"] = "smart"
+    merchant_source_confirmed: bool = False
+
+    @field_validator("source_url", "source", "source_type", mode="before")
+    @classmethod
+    def strip_text_fields(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("merchant_name", mode="before")
+    @classmethod
+    def normalize_merchant_whitespace(cls, value):
+        return clean_merchant_name(value) if isinstance(value, str) else value
+
+    @field_validator("target_city_slug", mode="before")
+    @classmethod
+    def normalize_city_slug(cls, value):
+        if not isinstance(value, str):
+            return value
+        return value.strip().lower().replace("_", "-").replace(" ", "-")
+
+    @field_validator("normalized_category", mode="before")
+    @classmethod
+    def normalize_fallback_category(cls, value):
+        return normalize_category_hint(value)
 
 
 class ReviewCandidateRequest(BaseModel):
@@ -429,16 +457,53 @@ def scan_collection(
 ):
     try:
         scanner = detect_curation_scanner(payload.source_url)
+        merchant_guidance = get_merchant_source_guidance(
+            payload.source_url,
+            payload.merchant_name,
+        )
+        if merchant_guidance.verification == "conflict":
+            raise ValueError(merchant_guidance.message)
+        if (
+            merchant_guidance.verification == "unverified"
+            and not payload.merchant_source_confirmed
+        ):
+            raise ValueError(
+                "Confirm that the merchant name matches the unverified source domain "
+                "before scanning."
+            )
+
+        city_exists = (
+            db.query(City.id)
+            .filter(City.slug == payload.target_city_slug)
+            .first()
+        )
+        if not city_exists:
+            raise ValueError(
+                f"City '{payload.target_city_slug}' does not exist in the Haroona API yet."
+            )
+
+        requested_image_mode = payload.image_mode
+        effective_image_mode = scanner.resolve_image_mode(requested_image_mode)
+        warnings: list[str] = []
+        if merchant_guidance.verification == "unverified" and merchant_guidance.message:
+            warnings.append(merchant_guidance.message)
+        if effective_image_mode != requested_image_mode:
+            warnings.append(
+                f"{scanner.name} currently supports "
+                f"{', '.join(scanner.supported_image_modes)} image mode only; "
+                f"the scan used {effective_image_mode}."
+            )
+
         scan_run_id = f"scan_{uuid4().hex}"
         options = CollectionScanOptions(
             source_url=payload.source_url,
-            merchant_name=payload.merchant_name,
+            merchant_name=merchant_guidance.resolved_name,
             target_city_slug=payload.target_city_slug,
             normalized_category=payload.normalized_category,
             source=scanner.source,
             source_type=scanner.source_type,
             limit=payload.limit,
-            image_mode=payload.image_mode,
+            image_mode=effective_image_mode,
             scan_run_id=scan_run_id,
         )
 
@@ -449,6 +514,15 @@ def scan_collection(
             "scanner": scanner.name,
             "detected_source": scanner.source,
             "detected_source_type": scanner.source_type,
+            "scan_capabilities": {
+                "supported_image_modes": list(scanner.supported_image_modes),
+                "requested_image_mode": requested_image_mode,
+                "effective_image_mode": effective_image_mode,
+                "source_host": merchant_guidance.source_host,
+                "merchant_verification": merchant_guidance.verification,
+                "suggested_merchant_name": merchant_guidance.suggested_name,
+            },
+            "warnings": warnings,
         }
     except UnsupportedScannerError as exc:
         raise HTTPException(
