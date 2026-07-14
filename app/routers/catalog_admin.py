@@ -508,6 +508,7 @@ def scan_collection(
         )
 
         result = scanner.scan(db, options)
+        warnings.extend(result.get("warnings") or [])
         return {
             **result,
             "scan_run_id": result.get("scan_run_id") or scan_run_id,

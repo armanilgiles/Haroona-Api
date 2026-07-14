@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
 from html import unescape
 from typing import Any
@@ -11,6 +11,13 @@ import requests
 from sqlalchemy.orm import Session
 
 from app.curation.scoring import score_city_fit
+from app.curation.shopify_image_selection import (
+    ShopifyImageCandidate,
+    ShopifyImageSelectionCache,
+    image_candidates_from_shopify_product,
+    normalize_image_mode,
+    select_shopify_product_image,
+)
 from app.models import ProductCandidate
 
 
@@ -18,6 +25,8 @@ USER_AGENT = (
     "Mozilla/5.0 (compatible; HaroonaCurator/0.1; +https://haroona.com) "
     "AppleWebKit/537.36"
 )
+SHOPIFY_PAGE_SIZE = 250
+MAX_SHOPIFY_SOURCE_PRODUCTS = 500
 
 
 @dataclass(frozen=True)
@@ -58,6 +67,33 @@ class CandidatePayload:
     haroona_score: int
     score_reasons: list[str]
     review_notes: str | None
+
+
+@dataclass(frozen=True)
+class ShopifyFetchResult:
+    products: list[dict[str, Any]]
+    pages_scanned: int
+    source_truncated: bool
+    warnings: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ShopifyCandidateDraft:
+    payload: CandidatePayload
+    image_candidates: list[ShopifyImageCandidate]
+
+
+@dataclass(frozen=True)
+class ShopifyBuildResult:
+    payloads: list[CandidatePayload]
+    discovered_count: int
+    skipped_invalid_products: int
+    skipped_missing_images: int
+    skipped_due_to_limit: int
+    pages_scanned: int
+    source_truncated: bool
+    image_candidates_checked: int
+    warnings: tuple[str, ...] = ()
 
 
 def _strip_html(value: str | None) -> str | None:
@@ -106,7 +142,7 @@ def _locale_prefix_from_url(source_url: str) -> str:
     return ""
 
 
-def _json_endpoint_candidates(source_url: str) -> list[str]:
+def _json_endpoint_candidates(source_url: str, *, page: int = 1) -> list[str]:
     source_url = _clean_collection_source_url(source_url)
     parsed = urlparse(source_url)
     origin = f"{parsed.scheme}://{parsed.netloc}"
@@ -115,8 +151,14 @@ def _json_endpoint_candidates(source_url: str) -> list[str]:
 
     candidates = []
     if locale_prefix:
-        candidates.append(f"{origin}{locale_prefix}/collections/{handle}/products.json?limit=250")
-    candidates.append(f"{origin}/collections/{handle}/products.json?limit=250")
+        candidates.append(
+            f"{origin}{locale_prefix}/collections/{handle}/products.json"
+            f"?limit={SHOPIFY_PAGE_SIZE}&page={page}"
+        )
+    candidates.append(
+        f"{origin}/collections/{handle}/products.json"
+        f"?limit={SHOPIFY_PAGE_SIZE}&page={page}"
+    )
     return candidates
 
 
@@ -174,14 +216,16 @@ def _normalize_category(title: str, product_type: str | None, fallback: str | No
     return None
 
 
-def fetch_shopify_collection_products(options: CollectionScanOptions) -> list[dict[str, Any]]:
+def _fetch_shopify_collection_result(options: CollectionScanOptions) -> ShopifyFetchResult:
     headers = {
         "User-Agent": USER_AGENT,
         "Accept": "application/json,text/html;q=0.9,*/*;q=0.8",
     }
 
     last_error: Exception | None = None
-    for endpoint in _json_endpoint_candidates(options.source_url):
+    selected_endpoint: str | None = None
+    first_page_products: list[dict[str, Any]] | None = None
+    for endpoint in _json_endpoint_candidates(options.source_url, page=1):
         try:
             response = requests.get(
                 endpoint,
@@ -193,93 +237,215 @@ def fetch_shopify_collection_products(options: CollectionScanOptions) -> list[di
             payload = response.json()
             products = payload.get("products")
             if isinstance(products, list):
-                return products
+                selected_endpoint = endpoint
+                first_page_products = products
+                break
         except Exception as exc:  # noqa: BLE001 - CLI should surface final failure cleanly
             last_error = exc
 
-    if last_error:
-        raise RuntimeError(f"Could not fetch Shopify collection JSON: {last_error}") from last_error
+    if selected_endpoint is None or first_page_products is None:
+        if last_error:
+            raise RuntimeError(
+                f"Could not fetch Shopify collection JSON: {last_error}"
+            ) from last_error
 
-    raise RuntimeError("Could not fetch Shopify collection JSON from known endpoints")
+        raise RuntimeError("Could not fetch Shopify collection JSON from known endpoints")
+
+    products: list[dict[str, Any]] = []
+    seen_product_ids: set[str] = set()
+
+    def append_unique(rows: list[dict[str, Any]]) -> None:
+        for product in rows:
+            product_id = str(product.get("id") or product.get("handle") or "").strip()
+            dedupe_key = product_id or f"row:{len(products)}"
+            if dedupe_key in seen_product_ids:
+                continue
+            seen_product_ids.add(dedupe_key)
+            products.append(product)
+
+    append_unique(first_page_products)
+    pages_scanned = 1
+    source_truncated = False
+    warnings: list[str] = []
+
+    current_page_products = first_page_products
+    max_pages = max(MAX_SHOPIFY_SOURCE_PRODUCTS // SHOPIFY_PAGE_SIZE, 1)
+    for page in range(2, max_pages + 1):
+        if len(current_page_products) < SHOPIFY_PAGE_SIZE:
+            break
+
+        endpoint = re.sub(r"([?&])page=\d+", rf"\g<1>page={page}", selected_endpoint)
+        try:
+            response = requests.get(
+                endpoint,
+                headers=headers,
+                timeout=options.request_timeout_seconds,
+            )
+            response.raise_for_status()
+            page_products = response.json().get("products")
+            if not isinstance(page_products, list):
+                raise ValueError("Shopify response did not contain a products list")
+        except Exception as exc:  # noqa: BLE001 - return useful partial results
+            source_truncated = True
+            warnings.append(
+                f"Shopify pagination stopped after page {pages_scanned}: {exc}."
+            )
+            break
+
+        pages_scanned += 1
+        current_page_products = page_products
+        append_unique(page_products)
+
+    if pages_scanned == max_pages and len(current_page_products) == SHOPIFY_PAGE_SIZE:
+        source_truncated = True
+        warnings.append(
+            f"The source scan stopped at {MAX_SHOPIFY_SOURCE_PRODUCTS} products; "
+            "narrow the collection if you need to inspect later products."
+        )
+
+    return ShopifyFetchResult(
+        products=products,
+        pages_scanned=pages_scanned,
+        source_truncated=source_truncated,
+        warnings=tuple(warnings),
+    )
+
+
+def fetch_shopify_collection_products(options: CollectionScanOptions) -> list[dict[str, Any]]:
+    return _fetch_shopify_collection_result(options).products
+
+
+def _build_candidate_draft(
+    product: dict[str, Any],
+    *,
+    options: CollectionScanOptions,
+    clean_source_url: str,
+) -> ShopifyCandidateDraft | None:
+    title = (product.get("title") or "").strip()
+    handle = (product.get("handle") or "").strip()
+    external_id = str(product.get("id") or handle).strip()
+    if not title or not external_id or not handle:
+        return None
+
+    variants = product.get("variants") or []
+    variant = _choose_variant(variants)
+    price_amount = _parse_decimal(variant.get("price") if variant else None)
+    currency = "USD" if "/en-us/" in clean_source_url else None
+    availability = (
+        "in_stock"
+        if any(v.get("available") is True for v in variants)
+        else "out_of_stock"
+    )
+
+    description = _strip_html(product.get("body_html"))
+    product_type = product.get("product_type")
+    tags = product.get("tags") or []
+    normalized_category = _normalize_category(title, product_type, options.normalized_category)
+
+    score = score_city_fit(
+        title=title,
+        description=description,
+        product_type=product_type,
+        tags=tags if isinstance(tags, list) else [],
+        target_city_slug=options.target_city_slug,
+        normalized_category=normalized_category,
+        merchant_name=options.merchant_name,
+    )
+
+    review_notes: list[str] = []
+    if price_amount is None:
+        review_notes.append("missing price")
+    if availability != "in_stock":
+        review_notes.append("not in stock")
+    if not normalized_category:
+        review_notes.append("unknown category")
+
+    return ShopifyCandidateDraft(
+        payload=CandidatePayload(
+            source=options.source,
+            source_type=options.source_type,
+            source_url=clean_source_url,
+            scan_run_id=options.scan_run_id,
+            merchant_name=options.merchant_name,
+            brand_name=product.get("vendor") or options.merchant_name,
+            external_product_id=external_id,
+            title=title,
+            description=description,
+            price_amount=price_amount,
+            currency=currency,
+            affiliate_url=None,
+            merchant_url=_build_product_url(clean_source_url, handle),
+            image_url=None,
+            availability=availability,
+            normalized_category=normalized_category,
+            target_city_slug=options.target_city_slug,
+            city_connection_type=score.city_connection_type,
+            city_connection_note=score.city_connection_note,
+            haroona_score=score.score,
+            score_reasons=score.reasons,
+            review_notes="; ".join(review_notes) or None,
+        ),
+        image_candidates=image_candidates_from_shopify_product(product),
+    )
+
+
+def build_candidate_payload_result(options: CollectionScanOptions) -> ShopifyBuildResult:
+    fetch_result = _fetch_shopify_collection_result(options)
+    clean_source_url = _clean_collection_source_url(options.source_url)
+    drafts: list[ShopifyCandidateDraft] = []
+    skipped_invalid_products = 0
+
+    for product in fetch_result.products:
+        draft = _build_candidate_draft(
+            product,
+            options=options,
+            clean_source_url=clean_source_url,
+        )
+        if draft is None:
+            skipped_invalid_products += 1
+            continue
+        drafts.append(draft)
+
+    drafts.sort(key=lambda item: item.payload.haroona_score, reverse=True)
+    payloads: list[CandidatePayload] = []
+    skipped_missing_images = 0
+    image_candidates_checked = 0
+    selection_cache = ShopifyImageSelectionCache()
+
+    for draft in drafts:
+        if len(payloads) >= options.limit:
+            break
+
+        selection = select_shopify_product_image(
+            draft.image_candidates,
+            image_mode=options.image_mode,
+            referer=clean_source_url,
+            timeout_seconds=options.request_timeout_seconds,
+            cache=selection_cache,
+        )
+        image_candidates_checked += selection.candidates_checked
+        if not selection.url:
+            skipped_missing_images += 1
+            continue
+
+        payloads.append(replace(draft.payload, image_url=selection.url))
+
+    reviewed_draft_count = len(payloads) + skipped_missing_images
+    return ShopifyBuildResult(
+        payloads=payloads,
+        discovered_count=len(fetch_result.products),
+        skipped_invalid_products=skipped_invalid_products,
+        skipped_missing_images=skipped_missing_images,
+        skipped_due_to_limit=max(len(drafts) - reviewed_draft_count, 0),
+        pages_scanned=fetch_result.pages_scanned,
+        source_truncated=fetch_result.source_truncated,
+        image_candidates_checked=image_candidates_checked,
+        warnings=fetch_result.warnings,
+    )
 
 
 def build_candidate_payloads(options: CollectionScanOptions) -> list[CandidatePayload]:
-    products = fetch_shopify_collection_products(options)
-    payloads: list[CandidatePayload] = []
-    clean_source_url = _clean_collection_source_url(options.source_url)
-
-    for product in products:
-        title = (product.get("title") or "").strip()
-        handle = (product.get("handle") or "").strip()
-        external_id = str(product.get("id") or handle).strip()
-        if not title or not external_id or not handle:
-            continue
-
-        variants = product.get("variants") or []
-        variant = _choose_variant(variants)
-        price_amount = _parse_decimal(variant.get("price") if variant else None)
-        currency = "USD" if "/en-us/" in clean_source_url else None
-        availability = "in_stock" if any(v.get("available") is True for v in variants) else "out_of_stock"
-
-        images = product.get("images") or []
-        image_url = None
-        if images and isinstance(images[0], dict):
-            image_url = images[0].get("src")
-
-        description = _strip_html(product.get("body_html"))
-        product_type = product.get("product_type")
-        tags = product.get("tags") or []
-        normalized_category = _normalize_category(title, product_type, options.normalized_category)
-
-        score = score_city_fit(
-            title=title,
-            description=description,
-            product_type=product_type,
-            tags=tags if isinstance(tags, list) else [],
-            target_city_slug=options.target_city_slug,
-            normalized_category=normalized_category,
-            merchant_name=options.merchant_name,
-        )
-
-        review_notes: list[str] = []
-        if not image_url:
-            review_notes.append("missing image")
-        if price_amount is None:
-            review_notes.append("missing price")
-        if availability != "in_stock":
-            review_notes.append("not in stock")
-        if not normalized_category:
-            review_notes.append("unknown category")
-
-        payloads.append(
-            CandidatePayload(
-                source=options.source,
-                source_type=options.source_type,
-                source_url=clean_source_url,
-                scan_run_id=options.scan_run_id,
-                merchant_name=options.merchant_name,
-                brand_name=product.get("vendor") or options.merchant_name,
-                external_product_id=external_id,
-                title=title,
-                description=description,
-                price_amount=price_amount,
-                currency=currency,
-                affiliate_url=None,
-                merchant_url=_build_product_url(clean_source_url, handle),
-                image_url=image_url,
-                availability=availability,
-                normalized_category=normalized_category,
-                target_city_slug=options.target_city_slug,
-                city_connection_type=score.city_connection_type,
-                city_connection_note=score.city_connection_note,
-                haroona_score=score.score,
-                score_reasons=score.reasons,
-                review_notes="; ".join(review_notes) or None,
-            )
-        )
-
-    payloads.sort(key=lambda item: item.haroona_score, reverse=True)
-    return payloads[: options.limit]
+    return build_candidate_payload_result(options).payloads
 
 
 def _candidate_dedupe_key(payload: CandidatePayload) -> tuple[str, str]:
@@ -397,6 +563,9 @@ def build_scan_summary(
     skipped_invalid_products: int = 0,
     skipped_due_to_limit: int = 0,
     image_mode: str | None = None,
+    pages_scanned: int | None = None,
+    source_truncated: bool = False,
+    image_candidates_checked: int | None = None,
 ) -> dict[str, Any]:
     saved_count = created_count + updated_count
     skipped_total = (
@@ -416,7 +585,7 @@ def build_scan_summary(
     if image_mode:
         message_parts.append(f"{image_mode.replace('_', '-')} mode")
 
-    return {
+    summary = {
         "requested_limit": requested_limit,
         "discovered": discovered_count,
         "selected_for_review": selected_count,
@@ -432,19 +601,32 @@ def build_scan_summary(
         },
         "message": "Scan " + " · ".join(message_parts) + ".",
     }
+    if pages_scanned is not None:
+        summary["pages_scanned"] = pages_scanned
+    if image_candidates_checked is not None:
+        summary["image_candidates_checked"] = image_candidates_checked
+    summary["source_truncated"] = source_truncated
+    return summary
 
 
 def scan_and_save_shopify_collection(db: Session, options: CollectionScanOptions) -> dict[str, Any]:
-    payloads = build_candidate_payloads(options)
+    build_result = build_candidate_payload_result(options)
+    payloads = build_result.payloads
     counts = upsert_product_candidates(db, payloads)
     summary = build_scan_summary(
         requested_limit=options.limit,
-        discovered_count=len(payloads),
+        discovered_count=build_result.discovered_count,
         selected_count=len(payloads),
         created_count=counts["created"],
         updated_count=counts["updated"],
         skipped_duplicates=counts["skipped_duplicates"],
-        image_mode=options.image_mode,
+        skipped_missing_images=build_result.skipped_missing_images,
+        skipped_invalid_products=build_result.skipped_invalid_products,
+        skipped_due_to_limit=build_result.skipped_due_to_limit,
+        image_mode=normalize_image_mode(options.image_mode),
+        pages_scanned=build_result.pages_scanned,
+        source_truncated=build_result.source_truncated,
+        image_candidates_checked=build_result.image_candidates_checked,
     )
     return {
         "status": "ok",
@@ -452,10 +634,11 @@ def scan_and_save_shopify_collection(db: Session, options: CollectionScanOptions
         "scan_run_id": options.scan_run_id,
         "merchant_name": options.merchant_name,
         "target_city_slug": options.target_city_slug,
-        "image_mode": options.image_mode,
+        "image_mode": normalize_image_mode(options.image_mode),
         "found": len(payloads),
         **counts,
         "summary": summary,
+        "warnings": list(build_result.warnings),
         "items": [
             {
                 "external_product_id": item.external_product_id,

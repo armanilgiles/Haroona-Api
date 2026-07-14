@@ -45,13 +45,16 @@ class SourceScanGuardrailTests(unittest.TestCase):
         self.assertEqual(guidance.verification, "unverified")
         self.assertEqual(guidance.resolved_name, "Example Boutique")
 
-    def test_shopify_reports_fast_as_its_only_current_image_mode(self):
+    def test_shopify_reports_all_image_modes(self):
         supported_modes, default_mode = get_scanner_image_capabilities(
             "shopify_collection"
         )
 
-        self.assertEqual(supported_modes, ("fast",))
-        self.assertEqual(default_mode, "fast")
+        self.assertEqual(
+            supported_modes,
+            ("fast", "smart", "model_only"),
+        )
+        self.assertEqual(default_mode, "smart")
 
     def test_shopcider_reports_all_image_modes(self):
         supported_modes, default_mode = get_scanner_image_capabilities(
