@@ -80,6 +80,7 @@ class ProductCardOut(BaseModel):
     merchantUrl: str | None = None
     isAffiliate: bool | None = None
     productImage: ImageAssetOut | None = None
+    originalProductImage: ImageAssetOut | None = None
     logoImage: ImageAssetOut | None = None
 
 
@@ -127,6 +128,7 @@ class FeedProductOut(BaseModel):
     merchantUrl: str | None = None
     isAffiliate: bool | None = None
     productImage: ImageAssetOut | None = None
+    originalProductImage: ImageAssetOut | None = None
     logoImage: ImageAssetOut | None = None
 
     videoUrl: str | None = None

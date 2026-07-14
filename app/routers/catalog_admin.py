@@ -15,7 +15,7 @@ from app.curation.product_candidate_publisher import (
     publish_approved_product_candidates,
     publish_product_candidate,
 )
-from app.curation.scanner_registry import detect_curation_scanner
+from app.curation.scanner_registry import UnsupportedScannerError, detect_curation_scanner
 from app.curation.shopify_collection import CollectionScanOptions
 
 router = APIRouter(prefix="/admin/catalog", tags=["admin-catalog"])
@@ -450,10 +450,36 @@ def scan_collection(
             "detected_source": scanner.source,
             "detected_source_type": scanner.source_type,
         }
+    except UnsupportedScannerError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "type": "unsupported_curate_studio_url",
+                "message": str(exc),
+                "host": exc.host,
+                "path": exc.path,
+                "supported_scanners": list(exc.supported_scanners),
+                "suggestion": "Use a supported collection/category URL or add a scanner for this store shape.",
+            },
+        ) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "type": "invalid_collection_scan_request",
+                "message": str(exc),
+                "suggestion": "Check the URL, city slug, merchant name, and selected image mode, then scan again.",
+            },
+        ) from exc
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Collection scan failed: {exc}") from exc
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "type": "collection_scan_failed",
+                "message": f"Collection scan failed: {exc}",
+                "suggestion": "Try Fast image mode first. If that works, rerun Smart or Model-only mode with a smaller limit.",
+            },
+        ) from exc
 
 
 @router.get("/product-candidates")

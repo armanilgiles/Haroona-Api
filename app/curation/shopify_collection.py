@@ -385,9 +385,67 @@ def upsert_product_candidates(db: Session, payloads: list[CandidatePayload]) -> 
     return {"created": created, "updated": updated, "skipped_duplicates": skipped_duplicates}
 
 
+def build_scan_summary(
+    *,
+    requested_limit: int,
+    discovered_count: int,
+    selected_count: int,
+    created_count: int,
+    updated_count: int,
+    skipped_duplicates: int = 0,
+    skipped_missing_images: int = 0,
+    skipped_invalid_products: int = 0,
+    skipped_due_to_limit: int = 0,
+    image_mode: str | None = None,
+) -> dict[str, Any]:
+    saved_count = created_count + updated_count
+    skipped_total = (
+        skipped_duplicates
+        + skipped_missing_images
+        + skipped_invalid_products
+        + skipped_due_to_limit
+    )
+
+    message_parts = [
+        f"saved {saved_count} candidate{'s' if saved_count != 1 else ''}",
+        f"{created_count} new",
+        f"{updated_count} updated",
+    ]
+    if skipped_total:
+        message_parts.append(f"{skipped_total} skipped")
+    if image_mode:
+        message_parts.append(f"{image_mode.replace('_', '-')} mode")
+
+    return {
+        "requested_limit": requested_limit,
+        "discovered": discovered_count,
+        "selected_for_review": selected_count,
+        "saved": saved_count,
+        "created": created_count,
+        "updated": updated_count,
+        "skipped_total": skipped_total,
+        "skipped": {
+            "duplicates": skipped_duplicates,
+            "missing_or_unverified_images": skipped_missing_images,
+            "invalid_products": skipped_invalid_products,
+            "over_limit": skipped_due_to_limit,
+        },
+        "message": "Scan " + " · ".join(message_parts) + ".",
+    }
+
+
 def scan_and_save_shopify_collection(db: Session, options: CollectionScanOptions) -> dict[str, Any]:
     payloads = build_candidate_payloads(options)
     counts = upsert_product_candidates(db, payloads)
+    summary = build_scan_summary(
+        requested_limit=options.limit,
+        discovered_count=len(payloads),
+        selected_count=len(payloads),
+        created_count=counts["created"],
+        updated_count=counts["updated"],
+        skipped_duplicates=counts["skipped_duplicates"],
+        image_mode=options.image_mode,
+    )
     return {
         "status": "ok",
         "source_url": _clean_collection_source_url(options.source_url),
@@ -397,6 +455,7 @@ def scan_and_save_shopify_collection(db: Session, options: CollectionScanOptions
         "image_mode": options.image_mode,
         "found": len(payloads),
         **counts,
+        "summary": summary,
         "items": [
             {
                 "external_product_id": item.external_product_id,
