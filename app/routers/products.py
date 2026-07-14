@@ -45,7 +45,9 @@ def _to_product_card(p: Product) -> ProductCardOut:
     external = p.external_id or str(p.id)
     product_id = external if "-" in external else f"{p.source}-{external}"
 
-    product_image_url = getattr(p, "product_image_url", None)
+    original_product_image_url = getattr(p, "product_image_url", None)
+    optimized_product_image_url = getattr(p, "optimized_product_image_url", None)
+    product_image_url = optimized_product_image_url or original_product_image_url
     product_image_alt = getattr(p, "product_image_alt", None) or p.name
 
     # Source of truth: Brand.logo_url (DB)
@@ -65,8 +67,18 @@ def _to_product_card(p: Product) -> ProductCardOut:
         merchantUrl=p.merchant_url,
         isAffiliate=p.is_affiliate,
         productImage=(
-            ImageAssetOut(url=product_image_url, alt=product_image_alt)
+            ImageAssetOut(
+                url=product_image_url,
+                alt=product_image_alt,
+                width=getattr(p, "product_image_width", None),
+                height=getattr(p, "product_image_height", None),
+            )
             if product_image_url
+            else None
+        ),
+        originalProductImage=(
+            ImageAssetOut(url=original_product_image_url, alt=product_image_alt)
+            if optimized_product_image_url and original_product_image_url
             else None
         ),
         logoImage=(ImageAssetOut(url=logo_url, alt=logo_alt) if logo_url else None),

@@ -527,10 +527,20 @@ def get_feed_products(
                 isAffiliate=p.is_affiliate,
                 productImage=(
                     ImageAssetOut(
+                        url=p.optimized_product_image_url or p.product_image_url,
+                        alt=p.product_image_alt or p.name,
+                        width=p.product_image_width,
+                        height=p.product_image_height,
+                    )
+                    if (p.optimized_product_image_url or p.product_image_url)
+                    else None
+                ),
+                originalProductImage=(
+                    ImageAssetOut(
                         url=p.product_image_url,
                         alt=p.product_image_alt or p.name,
                     )
-                    if p.product_image_url
+                    if p.optimized_product_image_url and p.product_image_url
                     else None
                 ),
                 videoUrl=p.video_url,
