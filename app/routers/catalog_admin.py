@@ -11,6 +11,15 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import AwinProductNormalized, Brand, CatalogBrandControl, City, Product, ProductCandidate
+from app.curation.candidate_queue import (
+    CandidateTransitionError,
+    apply_candidate_queue_filter,
+    approve_candidate,
+    archive_candidate,
+    reject_candidate,
+    resolve_candidate_queue_status,
+    restore_candidate,
+)
 from app.curation.product_candidate_publisher import (
     publish_approved_product_candidates,
     publish_product_candidate,
@@ -334,14 +343,10 @@ def list_brand_assets(
 
     if target_city_slug:
         query = query.filter(ProductCandidate.target_city_slug == target_city_slug)
-    if status and status != "all":
-        if status == "published":
-            query = query.filter(ProductCandidate.promoted_product_id.isnot(None))
-            query = query.filter(ProductCandidate.review_status != "archived")
-        else:
-            query = query.filter(ProductCandidate.review_status == status)
-    else:
-        query = query.filter(ProductCandidate.review_status != "archived")
+    try:
+        query = apply_candidate_queue_filter(query, status)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if source:
         query = query.filter(ProductCandidate.source == source)
     query = _apply_candidate_source_filters(
@@ -574,14 +579,10 @@ def list_product_candidates(
         ProductCandidate.id.desc(),
     )
 
-    if status == "published":
-        query = query.join(Product, ProductCandidate.promoted_product_id == Product.id)
-        query = query.filter(ProductCandidate.review_status != "archived")
-        query = query.filter(Product.is_active.is_(True))
-    elif status:
-        query = query.filter(ProductCandidate.review_status == status)
-    else:
-        query = query.filter(ProductCandidate.review_status != "archived")
+    try:
+        query = apply_candidate_queue_filter(query, status)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if source:
         query = query.filter(ProductCandidate.source == source)
     if target_city_slug:
@@ -626,6 +627,12 @@ def list_product_candidates(
                 "haroona_score": row.haroona_score,
                 "score_reasons": row.score_reasons,
                 "review_status": row.review_status,
+                "queue_status": resolve_candidate_queue_status(
+                    row.review_status,
+                    product_active_by_id.get(row.promoted_product_id)
+                    if row.promoted_product_id
+                    else None,
+                ),
                 "review_notes": row.review_notes,
                 "rejection_reason": row.rejection_reason,
                 "promoted_product_id": row.promoted_product_id,
@@ -661,6 +668,11 @@ def publish_candidate(
     row = db.query(ProductCandidate).filter(ProductCandidate.id == candidate_id).first()
     if not row:
         raise HTTPException(status_code=404, detail="Candidate not found")
+    if row.review_status == "archived":
+        raise HTTPException(
+            status_code=400,
+            detail="Archived candidates must be restored before publishing",
+        )
 
     payload = payload or PublishCandidateRequest()
 
@@ -687,37 +699,17 @@ def archive_product_candidate(
         raise HTTPException(status_code=404, detail="Candidate not found")
 
     payload = payload or ArchiveCandidateRequest()
-    now = datetime.now(timezone.utc)
     reason = _clean_text(payload.reason) or "Archived from Curator Studio"
-
-    archived_product_id = row.promoted_product_id
-    product_was_deactivated = False
-
-    if archived_product_id:
-        product = db.query(Product).filter(Product.id == archived_product_id).first()
-        if product:
-            product.is_active = False
-            product.deactivated_at = now
-            product.deactivation_reason = reason
-            product.availability_status = "archived"
-            product.price_check_status = "curator_archive"
-            product_was_deactivated = True
-
-    row.review_status = "archived"
-    row.reviewed_by = payload.archived_by
-    row.reviewed_at = now
-    row.review_notes = reason
-    row.rejection_reason = None
-
-    db.commit()
-
-    return {
-        "status": "ok",
-        "candidate_id": row.id,
-        "review_status": row.review_status,
-        "promoted_product_id": archived_product_id,
-        "product_was_deactivated": product_was_deactivated,
-    }
+    try:
+        return archive_candidate(
+            db,
+            row,
+            archived_by=payload.archived_by,
+            reason=reason,
+        )
+    except CandidateTransitionError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.patch("/product-candidates/{candidate_id}/restore")
@@ -732,46 +724,16 @@ def restore_product_candidate(
 
     payload = payload or RestoreCandidateRequest()
     restore_to = (_clean_text(payload.restore_to) or "pending").lower().replace("-", "_")
-    if restore_to not in {"pending", "live"}:
-        raise HTTPException(status_code=400, detail="restore_to must be 'pending' or 'live'")
-
-    now = datetime.now(timezone.utc)
-    restored_product_id = row.promoted_product_id
-    product_was_reactivated = False
-
-    if restore_to == "live":
-        if not restored_product_id:
-            raise HTTPException(status_code=400, detail="Only previously published candidates can be restored live")
-
-        product = db.query(Product).filter(Product.id == restored_product_id).first()
-        if not product:
-            raise HTTPException(status_code=404, detail="Promoted product was not found")
-
-        product.is_active = True
-        product.deactivated_at = None
-        product.deactivation_reason = None
-        product.availability_status = "in_stock"
-        product.price_check_status = "curator_restore"
-        row.review_status = "approved"
-        row.promoted_at = row.promoted_at or now
-        product_was_reactivated = True
-    else:
-        row.review_status = "pending"
-
-    row.reviewed_by = payload.restored_by
-    row.reviewed_at = now
-    row.review_notes = "Restored from archive"
-    row.rejection_reason = None
-
-    db.commit()
-
-    return {
-        "status": "ok",
-        "candidate_id": row.id,
-        "review_status": row.review_status,
-        "promoted_product_id": restored_product_id,
-        "product_was_reactivated": product_was_reactivated,
-    }
+    try:
+        return restore_candidate(
+            db,
+            row,
+            restored_by=payload.restored_by,
+            restore_to=restore_to,
+        )
+    except CandidateTransitionError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.patch("/product-candidates/{candidate_id}/approve")
@@ -785,13 +747,15 @@ def approve_product_candidate(
         raise HTTPException(status_code=404, detail="Candidate not found")
 
     payload = payload or ReviewCandidateRequest()
-    row.review_status = "approved"
-    row.reviewed_by = payload.reviewed_by
-    row.reviewed_at = datetime.now(timezone.utc)
-    row.rejection_reason = None
-
-    db.commit()
-    return {"status": "ok", "candidate_id": row.id, "review_status": row.review_status}
+    try:
+        return approve_candidate(
+            db,
+            row,
+            reviewed_by=payload.reviewed_by,
+        )
+    except CandidateTransitionError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.patch("/product-candidates/{candidate_id}/reject")
@@ -804,13 +768,13 @@ def reject_product_candidate(
     if not row:
         raise HTTPException(status_code=404, detail="Candidate not found")
 
-    if not payload.reason or len(payload.reason.strip()) < 3:
-        raise HTTPException(status_code=400, detail="Rejection reason must be at least 3 characters")
-
-    row.review_status = "rejected"
-    row.reviewed_by = payload.reviewed_by
-    row.reviewed_at = datetime.now(timezone.utc)
-    row.rejection_reason = payload.reason.strip()
-
-    db.commit()
-    return {"status": "ok", "candidate_id": row.id, "review_status": row.review_status}
+    try:
+        return reject_candidate(
+            db,
+            row,
+            reviewed_by=payload.reviewed_by,
+            reason=payload.reason or "",
+        )
+    except CandidateTransitionError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc

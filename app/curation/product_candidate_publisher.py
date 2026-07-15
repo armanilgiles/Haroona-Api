@@ -5,6 +5,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.curation.candidate_queue import candidate_has_active_product
 from app.models import Brand, City, Product, ProductCandidate
 from app.utils.affiliate import is_affiliate
 
@@ -175,6 +176,16 @@ def publish_product_candidate(
 
     assert city is not None  # Narrowed by _require_publishable.
 
+    linked_product = None
+    if candidate.promoted_product_id:
+        linked_product = (
+            db.query(Product)
+            .filter(Product.id == candidate.promoted_product_id)
+            .first()
+        )
+        if linked_product and linked_product.is_active:
+            raise ValueError("Candidate is already published")
+
     brand_name = _clean(candidate.brand_name) or _clean(candidate.merchant_name) or "Haroona Curated"
     brand = _get_or_create_brand(db, brand_name, city.country_id)
 
@@ -182,7 +193,7 @@ def publish_product_candidate(
     now = datetime.now(timezone.utc)
     availability = _normalize_availability(candidate.availability)
 
-    product = (
+    product = linked_product or (
         db.query(Product)
         .filter(Product.source == candidate.source)
         .filter(Product.external_id == candidate.external_product_id)
@@ -261,7 +272,7 @@ def publish_approved_product_candidates(
     query = (
         db.query(ProductCandidate)
         .filter(ProductCandidate.review_status == "approved")
-        .filter(ProductCandidate.promoted_product_id.is_(None))
+        .filter(~candidate_has_active_product())
         .order_by(ProductCandidate.haroona_score.desc(), ProductCandidate.id.desc())
     )
 
