@@ -35,9 +35,12 @@ from app.curation.product_candidate_publisher import (
 )
 from app.curation.scanner_registry import UnsupportedScannerError, detect_curation_scanner
 from app.curation.scan_runs import (
+    apply_scanned_candidate_filter,
     apply_scan_run_candidate_filter,
+    apply_store_candidate_filter,
     complete_scan_run,
     fail_scan_run,
+    list_scanned_stores,
     scan_run_payload,
     start_scan_run,
     update_scan_run_context,
@@ -278,6 +281,8 @@ def _apply_candidate_source_filters(
     merchant_name: str | None = None,
     source_url: str | None = None,
     scan_run_id: str | None = None,
+    source_host: str | None = None,
+    scanned_only: bool = False,
 ):
     cleaned_merchant = _clean_text(merchant_name)
     if cleaned_merchant:
@@ -288,6 +293,9 @@ def _apply_candidate_source_filters(
         query = query.filter(ProductCandidate.source_url == cleaned_source_url)
 
     query = apply_scan_run_candidate_filter(query, scan_run_id)
+    query = apply_store_candidate_filter(query, source_host)
+    if scanned_only:
+        query = apply_scanned_candidate_filter(query)
 
     return query
 
@@ -350,6 +358,8 @@ def list_brand_assets(
     merchant_name: str | None = Query(None),
     source_url: str | None = Query(None),
     scan_run_id: str | None = Query(None),
+    source_host: str | None = Query(None),
+    scanned_only: bool = Query(False),
     limit: int = Query(100, ge=1, le=500),
     db: Session = Depends(get_db),
 ):
@@ -369,6 +379,8 @@ def list_brand_assets(
         merchant_name=merchant_name,
         source_url=source_url,
         scan_run_id=scan_run_id,
+        source_host=source_host,
+        scanned_only=scanned_only,
     )
 
     rows = query.limit(limit).all()
@@ -468,6 +480,15 @@ def resolve_brand_asset(
             latest_scan_run_id=None,
         ),
     }
+
+
+@router.get("/scan-stores")
+def list_scan_stores(
+    limit: int = Query(500, ge=1, le=1000),
+    db: Session = Depends(get_db),
+):
+    items = list_scanned_stores(db, limit=limit)
+    return {"items": items, "count": len(items)}
 
 
 @router.get("/scan-runs")
@@ -690,6 +711,8 @@ def list_product_candidates(
     merchant_name: str | None = Query(None),
     source_url: str | None = Query(None),
     scan_run_id: str | None = Query(None),
+    source_host: str | None = Query(None),
+    scanned_only: bool = Query(False),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -712,6 +735,8 @@ def list_product_candidates(
         merchant_name=merchant_name,
         source_url=source_url,
         scan_run_id=scan_run_id,
+        source_host=source_host,
+        scanned_only=scanned_only,
     )
 
     rows = query.offset(offset).limit(limit).all()

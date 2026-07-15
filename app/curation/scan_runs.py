@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
 
-from sqlalchemy import exists, or_
+from sqlalchemy import exists, func, or_
 from sqlalchemy.orm import Query, Session
 
 from app.models import (
@@ -159,6 +159,88 @@ def apply_scan_run_candidate_filter(
             ProductCandidate.scan_run_id == cleaned_scan_run_id,
         )
     )
+
+
+def normalize_store_host(value: str | None) -> str:
+    normalized = (value or "").strip().lower().rstrip(".")
+    return normalized[4:] if normalized.startswith("www.") else normalized
+
+
+def apply_store_candidate_filter(
+    query: Query,
+    source_host: str | None,
+) -> Query:
+    normalized_host = normalize_store_host(source_host)
+    if not normalized_host:
+        return query
+
+    host_aliases = {normalized_host, f"www.{normalized_host}"}
+    membership_exists = (
+        exists()
+        .where(CurationScanRunCandidate.candidate_id == ProductCandidate.id)
+        .where(CurationScanRunCandidate.scan_run_id == CurationScanRun.id)
+        .where(CurationScanRun.status == "completed")
+        .where(func.lower(CurationScanRun.source_host).in_(host_aliases))
+    )
+    return query.filter(membership_exists)
+
+
+def apply_scanned_candidate_filter(query: Query) -> Query:
+    membership_exists = (
+        exists()
+        .where(CurationScanRunCandidate.candidate_id == ProductCandidate.id)
+        .where(CurationScanRunCandidate.scan_run_id == CurationScanRun.id)
+        .where(CurationScanRun.status == "completed")
+    )
+    return query.filter(membership_exists)
+
+
+def list_scanned_stores(
+    db: Session,
+    *,
+    limit: int = 500,
+) -> list[dict[str, Any]]:
+    runs = (
+        db.query(CurationScanRun)
+        .filter(CurationScanRun.status == "completed")
+        .filter(CurationScanRun.source_host.isnot(None))
+        .order_by(CurationScanRun.started_at.desc(), CurationScanRun.id.desc())
+        .all()
+    )
+
+    stores: dict[str, dict[str, Any]] = {}
+    for run in runs:
+        store_key = normalize_store_host(run.source_host)
+        if not store_key:
+            continue
+
+        store = stores.get(store_key)
+        if store is None:
+            if len(stores) >= limit:
+                continue
+            store = {
+                "store_key": store_key,
+                "source_host": store_key,
+                "merchant_name": run.merchant_name,
+                "latest_scan_run_id": run.id,
+                "latest_source_url": run.source_url,
+                "latest_target_city_slug": run.target_city_slug,
+                "latest_image_mode": (
+                    run.effective_image_mode or run.requested_image_mode
+                ),
+                "latest_scan_started_at": (
+                    run.started_at.isoformat() if run.started_at else None
+                ),
+                "scan_count": 0,
+                "city_slugs": [],
+            }
+            stores[store_key] = store
+
+        store["scan_count"] += 1
+        if run.target_city_slug not in store["city_slugs"]:
+            store["city_slugs"].append(run.target_city_slug)
+
+    return list(stores.values())
 
 
 def scan_run_payload(
