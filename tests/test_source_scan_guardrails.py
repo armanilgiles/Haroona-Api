@@ -67,6 +67,14 @@ class SourceScanGuardrailTests(unittest.TestCase):
         )
         self.assertEqual(default_mode, "smart")
 
+    def test_lilysilk_reports_fast_and_smart_image_modes(self):
+        supported_modes, default_mode = get_scanner_image_capabilities(
+            "lilysilk_category"
+        )
+
+        self.assertEqual(supported_modes, ("fast", "smart"))
+        self.assertEqual(default_mode, "smart")
+
 
 if __name__ == "__main__":
     unittest.main()

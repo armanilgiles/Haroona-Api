@@ -22,6 +22,7 @@ SCANNER_IMAGE_CAPABILITIES: dict[str, tuple[tuple[str, ...], str]] = {
     "shopify_collection": (("fast", "smart", "model_only"), "smart"),
     "shopcider_category": (("fast", "smart", "model_only"), "smart"),
     "shopcider_collection": (("fast", "smart", "model_only"), "smart"),
+    "lilysilk_category": (("fast", "smart"), "smart"),
 }
 
 _CATEGORY_ALIASES: dict[str, str | None] = {

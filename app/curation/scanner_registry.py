@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 
 from sqlalchemy.orm import Session
 
+from app.curation.lilysilk_category import scan_and_save_lilysilk_category
 from app.curation.shopcider_category import scan_and_save_shopcider_category
 from app.curation.shopify_collection import CollectionScanOptions, scan_and_save_shopify_collection
 from app.curation.source_scan_guardrails import get_scanner_image_capabilities
@@ -15,11 +16,16 @@ ScanFunction = Callable[[Session, CollectionScanOptions], dict[str, Any]]
 
 _SHOPCIDER_CATEGORY_PATTERN = re.compile(r"^/category/[^/?#]+-cid-\d+/?$", re.IGNORECASE)
 _SHOPCIDER_COLLECTION_PATTERN = re.compile(r"^/collection/[^/?#]+/?$", re.IGNORECASE)
+_LILYSILK_CATEGORY_PATTERN = re.compile(
+    r"^/[a-z]{2}/category/[^/?#]+\.html/?$",
+    re.IGNORECASE,
+)
 
 SUPPORTED_SCANNER_EXAMPLES = (
     "Shopify collection URL containing /collections/{handle}",
     "ShopCider category URL like https://www.shopcider.com/category/maxi-dresses-cid-3587",
     "ShopCider collection URL like https://www.shopcider.com/collection/top",
+    "LILYSILK category URL like https://www.lilysilk.com/us/category/womentops.html",
 )
 
 
@@ -101,6 +107,24 @@ def detect_curation_scanner(source_url: str) -> ScannerMatch:
         raise UnsupportedScannerError(
             source_url,
             "ShopCider is supported for /category/{slug}-cid-{id} and /collection/{slug} pages.",
+        )
+
+    if _host_matches(host, "lilysilk.com"):
+        if _LILYSILK_CATEGORY_PATTERN.match(path):
+            supported_image_modes, default_image_mode = get_scanner_image_capabilities(
+                "lilysilk_category"
+            )
+            return ScannerMatch(
+                name="lilysilk_category",
+                source="lilysilk",
+                source_type="category",
+                scan=scan_and_save_lilysilk_category,
+                supported_image_modes=supported_image_modes,
+                default_image_mode=default_image_mode,
+            )
+        raise UnsupportedScannerError(
+            source_url,
+            "LILYSILK is supported for /{store}/category/{slug}.html pages.",
         )
 
     if "/collections/" in path:
