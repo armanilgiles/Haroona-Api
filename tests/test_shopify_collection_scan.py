@@ -22,6 +22,14 @@ def _shopify_product(product_id: int, *, valid: bool = True) -> dict:
     }
 
 
+def _sold_out_shopify_product(product_id: int) -> dict:
+    product = _shopify_product(product_id)
+    product["title"] = "Playful Printed Smock Mini Dress"
+    product["tags"] = ["volume", "skirt", "cute", "statement"]
+    product["variants"] = [{"price": "89.00", "available": False}]
+    return product
+
+
 class ShopifyCollectionScanTests(unittest.TestCase):
     def setUp(self):
         self.options = CollectionScanOptions(
@@ -90,6 +98,42 @@ class ShopifyCollectionScanTests(unittest.TestCase):
         self.assertEqual(result.skipped_missing_images, 1)
         self.assertEqual(result.skipped_due_to_limit, 1)
         self.assertEqual(result.image_candidates_checked, 7)
+
+    @patch("app.curation.shopify_collection.select_shopify_product_image")
+    @patch("app.curation.shopify_collection._fetch_shopify_collection_result")
+    def test_sold_out_products_are_removed_before_ranking_and_image_checks(
+        self,
+        mock_fetch,
+        mock_select_image,
+    ):
+        mock_fetch.return_value = ShopifyFetchResult(
+            products=[
+                _sold_out_shopify_product(1),
+                _shopify_product(2),
+                _shopify_product(3),
+            ],
+            pages_scanned=1,
+            source_truncated=False,
+        )
+        mock_select_image.side_effect = [
+            ShopifyImageSelection(
+                url="https://cdn.example.com/2.jpg",
+                score=80,
+                candidates_checked=1,
+            ),
+            ShopifyImageSelection(
+                url="https://cdn.example.com/3.jpg",
+                score=75,
+                candidates_checked=1,
+            ),
+        ]
+
+        result = build_candidate_payload_result(self.options)
+
+        self.assertEqual([item.external_product_id for item in result.payloads], ["2", "3"])
+        self.assertEqual(result.skipped_ineligible_products, 1)
+        self.assertEqual(result.ineligible_reason_counts, {"out_of_stock": 1})
+        self.assertEqual(mock_select_image.call_count, 2)
 
 
 if __name__ == "__main__":

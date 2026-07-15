@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from sqlalchemy import exists
 from sqlalchemy.orm import Query, Session
 
+from app.curation.eligibility import INELIGIBLE, evaluate_candidate_eligibility
 from app.models import Product, ProductCandidate
 
 
@@ -97,6 +98,22 @@ def _require_pending_review_transition(
         )
 
 
+def _refresh_candidate_eligibility(candidate: ProductCandidate):
+    result = evaluate_candidate_eligibility(
+        title=candidate.title,
+        affiliate_url=candidate.affiliate_url,
+        merchant_url=candidate.merchant_url,
+        image_url=candidate.image_url,
+        availability=candidate.availability,
+        normalized_category=candidate.normalized_category,
+        price_amount=candidate.price_amount,
+        currency=candidate.currency,
+    )
+    candidate.eligibility_status = result.status
+    candidate.eligibility_reasons = result.reasons
+    return result
+
+
 def approve_candidate(
     db: Session,
     candidate: ProductCandidate,
@@ -104,6 +121,12 @@ def approve_candidate(
     reviewed_by: str,
 ) -> dict:
     _require_pending_review_transition(db, candidate, "approved")
+    eligibility = _refresh_candidate_eligibility(candidate)
+    if eligibility.status == INELIGIBLE:
+        reasons = ", ".join(eligibility.blocking_reasons)
+        raise CandidateTransitionError(
+            f"Candidate is not eligible for approval: {reasons}"
+        )
     candidate.review_status = "approved"
     candidate.reviewed_by = reviewed_by
     candidate.reviewed_at = datetime.now(timezone.utc)
@@ -198,6 +221,12 @@ def restore_candidate(
     product_was_reactivated = False
 
     if normalized_target == "live":
+        eligibility = _refresh_candidate_eligibility(candidate)
+        if eligibility.status == INELIGIBLE:
+            reasons = ", ".join(eligibility.blocking_reasons)
+            raise CandidateTransitionError(
+                f"Candidate is not eligible to restore live: {reasons}"
+            )
         if not restored_product_id or not product:
             raise CandidateTransitionError(
                 "Only previously published candidates can be restored live"

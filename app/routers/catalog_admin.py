@@ -642,6 +642,8 @@ def scan_collection(
             limit=payload.limit,
             image_mode=effective_image_mode,
             scan_run_id=scan_run_id,
+            merchant_verification=merchant_guidance.verification,
+            merchant_profile_allowed=merchant_guidance.verification == "verified",
         )
 
         result = scanner.scan(db, options)
@@ -718,7 +720,7 @@ def list_product_candidates(
     db: Session = Depends(get_db),
 ):
     query = db.query(ProductCandidate).order_by(
-        ProductCandidate.haroona_score.desc(),
+        ProductCandidate.city_fit_score.desc(),
         ProductCandidate.id.desc(),
     )
 
@@ -769,6 +771,22 @@ def list_product_candidates(
                 "target_city_slug": row.target_city_slug,
                 "city_connection_type": row.city_connection_type,
                 "city_connection_note": row.city_connection_note,
+                "merchant_verification": row.merchant_verification,
+                "merchant_profile_key": row.merchant_profile_key,
+                "eligibility_status": row.eligibility_status,
+                "eligibility_reasons": row.eligibility_reasons,
+                "platform_alignment_score": (
+                    str(row.platform_alignment_score)
+                    if row.platform_alignment_score is not None
+                    else None
+                ),
+                "platform_alignment_reasons": row.platform_alignment_reasons,
+                "city_fit_score": row.city_fit_score,
+                "city_fit_scores": row.city_fit_scores,
+                "secondary_city_slug": row.secondary_city_slug,
+                "scoring_confidence": row.scoring_confidence,
+                "scoring_method": row.scoring_method,
+                "scoring_version": row.scoring_version,
                 "haroona_score": row.haroona_score,
                 "score_reasons": row.score_reasons,
                 "review_status": row.review_status,

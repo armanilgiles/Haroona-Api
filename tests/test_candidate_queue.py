@@ -5,6 +5,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.curation.candidate_queue import (
     CandidateTransitionError,
+    approve_candidate,
     apply_candidate_queue_filter,
     reject_candidate,
     resolve_candidate_queue_status,
@@ -186,6 +187,22 @@ class CandidateQueueTests(unittest.TestCase):
             )
 
         self.assertIn("unpublished", str(raised.exception).lower())
+
+    def test_ineligible_candidate_cannot_be_approved(self):
+        candidate = self._candidate("sold-out", review_status="pending")
+        candidate.availability = "out_of_stock"
+        self.db.commit()
+
+        with self.assertRaises(CandidateTransitionError) as raised:
+            approve_candidate(
+                self.db,
+                candidate,
+                reviewed_by="test-curator",
+            )
+
+        self.assertIn("out_of_stock", str(raised.exception))
+        self.assertEqual(candidate.review_status, "pending")
+        self.assertEqual(candidate.eligibility_status, "ineligible")
 
 
 if __name__ == "__main__":

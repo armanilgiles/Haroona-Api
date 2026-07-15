@@ -11,6 +11,7 @@ class ScoreResult:
     reasons: list[str]
     city_connection_type: str | None = None
     city_connection_note: str | None = None
+    merchant_profile_key: str | None = None
 
 
 CITY_RULES: dict[str, dict[str, list[str]]] = {
@@ -89,6 +90,7 @@ def score_city_fit(
     target_city_slug: str = "london",
     normalized_category: str | None = None,
     merchant_name: str | None = None,
+    merchant_profile_allowed: bool = True,
 ) -> ScoreResult:
     """Simple deterministic Haroona-fit score.
 
@@ -125,7 +127,7 @@ def score_city_fit(
             reasons.append(f"category match: {normalized_category}")
 
     merchant_fit = evaluate_merchant_fit(
-        merchant_name=merchant_name,
+        merchant_name=merchant_name if merchant_profile_allowed else None,
         target_city_slug=target_city_slug,
     )
     score += merchant_fit.score_adjustment
@@ -137,4 +139,7 @@ def score_city_fit(
         reasons=reasons[:16],
         city_connection_type=merchant_fit.city_connection_type,
         city_connection_note=merchant_fit.city_connection_note,
+        merchant_profile_key=(
+            merchant_fit.profile.merchant_key if merchant_fit.profile else None
+        ),
     )

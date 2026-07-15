@@ -6,6 +6,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.curation.candidate_queue import candidate_has_active_product
+from app.curation.eligibility import INELIGIBLE, evaluate_candidate_eligibility
 from app.models import Brand, City, Product, ProductCandidate
 from app.utils.affiliate import is_affiliate
 
@@ -123,17 +124,21 @@ def _require_publishable(candidate: ProductCandidate, city: City | None) -> None
     if not city:
         raise ValueError(f"City '{candidate.target_city_slug}' does not exist yet")
 
-    if not _clean(candidate.title):
-        raise ValueError("Candidate is missing a product title")
-
-    if not (_clean(candidate.affiliate_url) or _clean(candidate.merchant_url)):
-        raise ValueError("Candidate is missing a merchant or affiliate URL")
-
-    if not _clean(candidate.image_url):
-        raise ValueError("Candidate is missing a product image")
-
-    if _normalize_availability(candidate.availability) != "in_stock":
-        raise ValueError("Only in-stock candidates can be published")
+    eligibility = evaluate_candidate_eligibility(
+        title=candidate.title,
+        affiliate_url=candidate.affiliate_url,
+        merchant_url=candidate.merchant_url,
+        image_url=candidate.image_url,
+        availability=candidate.availability,
+        normalized_category=candidate.normalized_category,
+        price_amount=candidate.price_amount,
+        currency=candidate.currency,
+    )
+    candidate.eligibility_status = eligibility.status
+    candidate.eligibility_reasons = eligibility.reasons
+    if eligibility.status == INELIGIBLE:
+        reasons = ", ".join(eligibility.blocking_reasons)
+        raise ValueError(f"Candidate is not eligible to publish: {reasons}")
 
 
 def _get_or_create_brand(db: Session, name: str, country_id: int) -> Brand:
@@ -273,7 +278,7 @@ def publish_approved_product_candidates(
         db.query(ProductCandidate)
         .filter(ProductCandidate.review_status == "approved")
         .filter(~candidate_has_active_product())
-        .order_by(ProductCandidate.haroona_score.desc(), ProductCandidate.id.desc())
+        .order_by(ProductCandidate.city_fit_score.desc(), ProductCandidate.id.desc())
     )
 
     if target_city_slug:

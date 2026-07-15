@@ -11,6 +11,11 @@ from urllib.parse import urlparse, urlunparse
 import requests
 from sqlalchemy.orm import Session
 
+from app.curation.eligibility import (
+    add_reason_counts,
+    blocking_reasons_only,
+    evaluate_candidate_eligibility,
+)
 from app.curation.scoring import score_city_fit
 from app.curation.shopify_collection import (
     USER_AGENT,
@@ -71,6 +76,8 @@ class LilySilkBuildResult:
     payloads: list[CandidatePayload]
     discovered_count: int
     skipped_invalid_products: int
+    skipped_ineligible_products: int
+    ineligible_reason_counts: dict[str, int]
     skipped_missing_images: int
     skipped_due_to_limit: int
     pages_scanned: int
@@ -475,6 +482,7 @@ def _build_candidate_draft(
         target_city_slug=options.target_city_slug,
         normalized_category=normalized_category,
         merchant_name=options.merchant_name,
+        merchant_profile_allowed=options.merchant_profile_allowed,
     )
     price_amount, currency = _price_from_product(product)
     schema_availability = str(product.get("schema_availability") or "").lower()
@@ -484,13 +492,18 @@ def _build_candidate_draft(
         else "unknown"
     )
 
-    review_notes: list[str] = []
-    if price_amount is None:
-        review_notes.append("missing price")
-    if availability != "in_stock":
-        review_notes.append("availability unverified")
-    if not normalized_category:
-        review_notes.append("unknown category")
+    merchant_url = _product_url(product, source_url, store_code)
+    eligibility = evaluate_candidate_eligibility(
+        title=title,
+        affiliate_url=None,
+        merchant_url=merchant_url,
+        image_url=None,
+        availability=availability,
+        normalized_category=normalized_category,
+        price_amount=price_amount,
+        currency=currency,
+        require_image=False,
+    )
 
     return LilySilkCandidateDraft(
         payload=CandidatePayload(
@@ -508,16 +521,31 @@ def _build_candidate_draft(
             price_amount=price_amount,
             currency=currency,
             affiliate_url=None,
-            merchant_url=_product_url(product, source_url, store_code),
+            merchant_url=merchant_url,
             image_url=None,
             availability=availability,
             normalized_category=normalized_category,
             target_city_slug=options.target_city_slug,
             city_connection_type=score.city_connection_type,
             city_connection_note=score.city_connection_note,
+            merchant_verification=options.merchant_verification,
+            merchant_profile_key=score.merchant_profile_key,
+            eligibility_status=eligibility.status,
+            eligibility_reasons=eligibility.reasons,
+            platform_alignment_score=None,
+            platform_alignment_reasons=[],
+            city_fit_score=score.score,
+            city_fit_scores={options.target_city_slug: score.score},
+            secondary_city_slug=None,
+            scoring_confidence=None,
+            scoring_method="deterministic_rules",
+            scoring_version="rules_v1",
             haroona_score=score.score,
             score_reasons=score.reasons,
-            review_notes="; ".join(review_notes) or None,
+            review_notes=(
+                "; ".join(reason.replace("_", " ") for reason in eligibility.warning_reasons)
+                or None
+            ),
         ),
         image_candidates=_image_candidates(product, title),
     )
@@ -531,6 +559,8 @@ def build_lilysilk_candidate_payload_result(
     store_code = _store_code_from_url(source_url)
     drafts: list[LilySilkCandidateDraft] = []
     skipped_invalid_products = 0
+    skipped_ineligible_products = 0
+    ineligible_reason_counts: dict[str, int] = {}
 
     for product in fetch_result.products:
         draft = _build_candidate_draft(
@@ -541,6 +571,13 @@ def build_lilysilk_candidate_payload_result(
         )
         if draft is None:
             skipped_invalid_products += 1
+            continue
+        if draft.payload.eligibility_status == "ineligible":
+            skipped_ineligible_products += 1
+            add_reason_counts(
+                ineligible_reason_counts,
+                blocking_reasons_only(draft.payload.eligibility_reasons),
+            )
             continue
         drafts.append(draft)
 
@@ -565,13 +602,32 @@ def build_lilysilk_candidate_payload_result(
         if not selection.url:
             skipped_missing_images += 1
             continue
-        payloads.append(replace(draft.payload, image_url=selection.url))
+        eligibility = evaluate_candidate_eligibility(
+            title=draft.payload.title,
+            affiliate_url=draft.payload.affiliate_url,
+            merchant_url=draft.payload.merchant_url,
+            image_url=selection.url,
+            availability=draft.payload.availability,
+            normalized_category=draft.payload.normalized_category,
+            price_amount=draft.payload.price_amount,
+            currency=draft.payload.currency,
+        )
+        payloads.append(
+            replace(
+                draft.payload,
+                image_url=selection.url,
+                eligibility_status=eligibility.status,
+                eligibility_reasons=eligibility.reasons,
+            )
+        )
 
     reviewed_draft_count = len(payloads) + skipped_missing_images
     return LilySilkBuildResult(
         payloads=payloads,
         discovered_count=len(fetch_result.products),
         skipped_invalid_products=skipped_invalid_products,
+        skipped_ineligible_products=skipped_ineligible_products,
+        ineligible_reason_counts=ineligible_reason_counts,
         skipped_missing_images=skipped_missing_images,
         skipped_due_to_limit=max(len(drafts) - reviewed_draft_count, 0),
         pages_scanned=fetch_result.pages_scanned,
@@ -604,6 +660,8 @@ def scan_and_save_lilysilk_category(
         skipped_duplicates=counts["skipped_duplicates"],
         skipped_missing_images=build_result.skipped_missing_images,
         skipped_invalid_products=build_result.skipped_invalid_products,
+        skipped_ineligible_products=build_result.skipped_ineligible_products,
+        ineligible_reason_counts=build_result.ineligible_reason_counts,
         skipped_due_to_limit=build_result.skipped_due_to_limit,
         image_mode=image_mode,
         pages_scanned=build_result.pages_scanned,
@@ -635,6 +693,22 @@ def scan_and_save_lilysilk_category(
                 "normalized_category": item.normalized_category,
                 "city_connection_type": item.city_connection_type,
                 "city_connection_note": item.city_connection_note,
+                "merchant_verification": item.merchant_verification,
+                "merchant_profile_key": item.merchant_profile_key,
+                "eligibility_status": item.eligibility_status,
+                "eligibility_reasons": item.eligibility_reasons,
+                "platform_alignment_score": (
+                    str(item.platform_alignment_score)
+                    if item.platform_alignment_score is not None
+                    else None
+                ),
+                "platform_alignment_reasons": item.platform_alignment_reasons,
+                "city_fit_score": item.city_fit_score,
+                "city_fit_scores": item.city_fit_scores,
+                "secondary_city_slug": item.secondary_city_slug,
+                "scoring_confidence": item.scoring_confidence,
+                "scoring_method": item.scoring_method,
+                "scoring_version": item.scoring_version,
                 "haroona_score": item.haroona_score,
                 "score_reasons": item.score_reasons,
                 "review_notes": item.review_notes,

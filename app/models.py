@@ -325,6 +325,8 @@ class ProductCandidate(Base):
 
     merchant_name = Column(String(255), nullable=False, index=True)
     brand_name = Column(String(255), nullable=True)
+    merchant_verification = Column(String(20), nullable=False, default="unverified")
+    merchant_profile_key = Column(String(100), nullable=True)
     external_product_id = Column(String(200), nullable=False)
 
     title = Column(String(500), nullable=False)
@@ -342,6 +344,21 @@ class ProductCandidate(Base):
     target_city_slug = Column(String(80), nullable=False, index=True)
     city_connection_type = Column(String(40), nullable=True)
     city_connection_note = Column(String(255), nullable=True)
+
+    eligibility_status = Column(
+        String(20), nullable=False, default="needs_review", index=True
+    )
+    eligibility_reasons = Column(JSON, nullable=False, default=list)
+    platform_alignment_score = Column(Numeric(3, 1), nullable=True)
+    platform_alignment_reasons = Column(JSON, nullable=False, default=list)
+    city_fit_score = Column(Integer, nullable=False, default=0, index=True)
+    city_fit_scores = Column(JSON, nullable=False, default=dict)
+    secondary_city_slug = Column(String(80), nullable=True, index=True)
+    scoring_confidence = Column(Integer, nullable=True)
+    scoring_method = Column(
+        String(40), nullable=False, default="deterministic_rules"
+    )
+    scoring_version = Column(String(40), nullable=False, default="rules_v1")
 
     haroona_score = Column(Integer, nullable=False, default=0, index=True)
     score_reasons = Column(JSON, nullable=False, default=list)

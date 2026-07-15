@@ -152,6 +152,13 @@ def _identity_for_host(host: str) -> MerchantSourceIdentity | None:
     return None
 
 
+def _identity_for_merchant_name(merchant_name: str) -> MerchantSourceIdentity | None:
+    for identity in KNOWN_MERCHANT_SOURCES:
+        if _merchant_matches_identity(merchant_name, identity):
+            return identity
+    return None
+
+
 def _merchant_matches_identity(
     merchant_name: str,
     identity: MerchantSourceIdentity,
@@ -174,6 +181,22 @@ def get_merchant_source_guidance(
     identity = _identity_for_host(host)
 
     if identity is None:
+        claimed_identity = _identity_for_merchant_name(cleaned_name)
+        if claimed_identity is not None:
+            expected_domains = ", ".join(claimed_identity.domains)
+            suggested_name = host.removeprefix("www.") or None
+            return MerchantSourceGuidance(
+                source_host=host,
+                verification="conflict",
+                submitted_name=cleaned_name,
+                resolved_name=cleaned_name,
+                suggested_name=suggested_name,
+                message=(
+                    f"Merchant '{cleaned_name}' has a saved profile for {expected_domains}, "
+                    f"not {host or 'this URL'}. Use the actual store or marketplace name "
+                    "for this scan."
+                ),
+            )
         return MerchantSourceGuidance(
             source_host=host,
             verification="unverified",

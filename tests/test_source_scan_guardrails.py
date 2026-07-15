@@ -45,6 +45,16 @@ class SourceScanGuardrailTests(unittest.TestCase):
         self.assertEqual(guidance.verification, "unverified")
         self.assertEqual(guidance.resolved_name, "Example Boutique")
 
+    def test_unknown_domain_cannot_claim_a_known_merchant_profile(self):
+        guidance = get_merchant_source_guidance(
+            "https://shop.simon.com/collections/women-clothing-dresses",
+            "Nobody's Child",
+        )
+
+        self.assertEqual(guidance.verification, "conflict")
+        self.assertEqual(guidance.suggested_name, "shop.simon.com")
+        self.assertIn("nobodyschild.com", guidance.message or "")
+
     def test_shopify_reports_all_image_modes(self):
         supported_modes, default_mode = get_scanner_image_capabilities(
             "shopify_collection"
