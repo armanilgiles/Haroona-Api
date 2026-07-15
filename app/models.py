@@ -369,3 +369,65 @@ class ProductCandidate(Base):
     def __repr__(self):
         return f"<ProductCandidate {self.title} score={self.haroona_score}>"
 
+
+class CurationScanRun(Base):
+    __tablename__ = "curation_scan_runs"
+
+    id = Column(String(64), primary_key=True)
+    status = Column(String(20), nullable=False, default="running", index=True)
+
+    source_url = Column(Text, nullable=False)
+    source_host = Column(String(255), nullable=True, index=True)
+    merchant_name = Column(String(255), nullable=False, index=True)
+    target_city_slug = Column(String(80), nullable=False, index=True)
+    normalized_category = Column(String(80), nullable=True)
+
+    scanner_name = Column(String(80), nullable=True)
+    source = Column(String(50), nullable=True)
+    source_type = Column(String(50), nullable=True)
+    merchant_verification = Column(String(20), nullable=True)
+    requested_image_mode = Column(String(30), nullable=False)
+    effective_image_mode = Column(String(30), nullable=True)
+    requested_limit = Column(Integer, nullable=False)
+
+    discovered_count = Column(Integer, nullable=False, default=0)
+    selected_count = Column(Integer, nullable=False, default=0)
+    saved_count = Column(Integer, nullable=False, default=0)
+    created_count = Column(Integer, nullable=False, default=0)
+    updated_count = Column(Integer, nullable=False, default=0)
+    skipped_count = Column(Integer, nullable=False, default=0)
+
+    warnings = Column(JSON, nullable=False, default=list)
+    summary = Column(JSON, nullable=True)
+    error_message = Column(Text, nullable=True)
+    started_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        index=True,
+    )
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+
+    def __repr__(self):
+        return f"<CurationScanRun {self.id} status={self.status}>"
+
+
+class CurationScanRunCandidate(Base):
+    __tablename__ = "curation_scan_run_candidates"
+
+    scan_run_id = Column(
+        String(64),
+        ForeignKey("curation_scan_runs.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    candidate_id = Column(
+        Integer,
+        ForeignKey("product_candidates.id", ondelete="CASCADE"),
+        primary_key=True,
+        index=True,
+    )
+    linked_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )

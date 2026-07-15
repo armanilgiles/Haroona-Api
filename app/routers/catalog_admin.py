@@ -10,7 +10,16 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import AwinProductNormalized, Brand, CatalogBrandControl, City, Product, ProductCandidate
+from app.models import (
+    AwinProductNormalized,
+    Brand,
+    CatalogBrandControl,
+    City,
+    CurationScanRun,
+    CurationScanRunCandidate,
+    Product,
+    ProductCandidate,
+)
 from app.curation.candidate_queue import (
     CandidateTransitionError,
     apply_candidate_queue_filter,
@@ -25,6 +34,14 @@ from app.curation.product_candidate_publisher import (
     publish_product_candidate,
 )
 from app.curation.scanner_registry import UnsupportedScannerError, detect_curation_scanner
+from app.curation.scan_runs import (
+    apply_scan_run_candidate_filter,
+    complete_scan_run,
+    fail_scan_run,
+    scan_run_payload,
+    start_scan_run,
+    update_scan_run_context,
+)
 from app.curation.shopify_collection import CollectionScanOptions
 from app.curation.source_scan_guardrails import (
     clean_merchant_name,
@@ -270,9 +287,7 @@ def _apply_candidate_source_filters(
     if cleaned_source_url:
         query = query.filter(ProductCandidate.source_url == cleaned_source_url)
 
-    cleaned_scan_run_id = _clean_text(scan_run_id)
-    if cleaned_scan_run_id:
-        query = query.filter(ProductCandidate.scan_run_id == cleaned_scan_run_id)
+    query = apply_scan_run_candidate_filter(query, scan_run_id)
 
     return query
 
@@ -455,11 +470,98 @@ def resolve_brand_asset(
     }
 
 
+@router.get("/scan-runs")
+def list_scan_runs(
+    status: str | None = Query(None),
+    target_city_slug: str | None = Query(None),
+    merchant_name: str | None = Query(None),
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+):
+    query = db.query(CurationScanRun)
+    cleaned_status = (_clean_text(status) or "all").lower()
+    if cleaned_status not in {"all", "running", "completed", "failed"}:
+        raise HTTPException(
+            status_code=400,
+            detail="Scan status must be running, completed, failed, or all",
+        )
+    if cleaned_status != "all":
+        query = query.filter(CurationScanRun.status == cleaned_status)
+    if target_city_slug:
+        query = query.filter(CurationScanRun.target_city_slug == target_city_slug)
+    cleaned_merchant = _clean_text(merchant_name)
+    if cleaned_merchant:
+        query = query.filter(
+            func.lower(CurationScanRun.merchant_name) == cleaned_merchant.lower()
+        )
+
+    total = query.count()
+    rows = (
+        query.order_by(CurationScanRun.started_at.desc(), CurationScanRun.id.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+    run_ids = [row.id for row in rows]
+    candidate_counts = {
+        run_id: count
+        for run_id, count in (
+            db.query(
+                CurationScanRunCandidate.scan_run_id,
+                func.count(CurationScanRunCandidate.candidate_id),
+            )
+            .filter(CurationScanRunCandidate.scan_run_id.in_(run_ids))
+            .group_by(CurationScanRunCandidate.scan_run_id)
+            .all()
+        )
+    } if run_ids else {}
+
+    return {
+        "items": [
+            scan_run_payload(
+                row,
+                candidate_count=int(candidate_counts.get(row.id, 0)),
+            )
+            for row in rows
+        ],
+        "count": total,
+    }
+
+
+@router.get("/scan-runs/{scan_run_id}")
+def get_scan_run(
+    scan_run_id: str,
+    db: Session = Depends(get_db),
+):
+    run = db.query(CurationScanRun).filter(CurationScanRun.id == scan_run_id).first()
+    if not run:
+        raise HTTPException(status_code=404, detail="Scan run not found")
+    candidate_count = (
+        db.query(func.count(CurationScanRunCandidate.candidate_id))
+        .filter(CurationScanRunCandidate.scan_run_id == run.id)
+        .scalar()
+        or 0
+    )
+    return scan_run_payload(run, candidate_count=int(candidate_count))
+
+
 @router.post("/collection-scan")
 def scan_collection(
     payload: CollectionScanRequest,
     db: Session = Depends(get_db),
 ):
+    scan_run_id = f"scan_{uuid4().hex}"
+    scan_run = start_scan_run(
+        db,
+        scan_run_id=scan_run_id,
+        source_url=payload.source_url,
+        merchant_name=payload.merchant_name,
+        target_city_slug=payload.target_city_slug,
+        normalized_category=payload.normalized_category,
+        requested_image_mode=payload.image_mode,
+        requested_limit=payload.limit,
+    )
     try:
         scanner = detect_curation_scanner(payload.source_url)
         merchant_guidance = get_merchant_source_guidance(
@@ -499,7 +601,16 @@ def scan_collection(
                 f"the scan used {effective_image_mode}."
             )
 
-        scan_run_id = f"scan_{uuid4().hex}"
+        update_scan_run_context(
+            db,
+            scan_run,
+            merchant_name=merchant_guidance.resolved_name,
+            scanner_name=scanner.name,
+            source=scanner.source,
+            source_type=scanner.source_type,
+            merchant_verification=merchant_guidance.verification,
+            effective_image_mode=effective_image_mode,
+        )
         options = CollectionScanOptions(
             source_url=payload.source_url,
             merchant_name=merchant_guidance.resolved_name,
@@ -514,6 +625,12 @@ def scan_collection(
 
         result = scanner.scan(db, options)
         warnings.extend(result.get("warnings") or [])
+        complete_scan_run(
+            db,
+            scan_run,
+            result=result,
+            warnings=warnings,
+        )
         return {
             **result,
             "scan_run_id": result.get("scan_run_id") or scan_run_id,
@@ -531,6 +648,7 @@ def scan_collection(
             "warnings": warnings,
         }
     except UnsupportedScannerError as exc:
+        fail_scan_run(db, scan_run_id, error_message=str(exc))
         raise HTTPException(
             status_code=400,
             detail={
@@ -543,6 +661,7 @@ def scan_collection(
             },
         ) from exc
     except ValueError as exc:
+        fail_scan_run(db, scan_run_id, error_message=str(exc))
         raise HTTPException(
             status_code=400,
             detail={
@@ -552,6 +671,7 @@ def scan_collection(
             },
         ) from exc
     except Exception as exc:
+        fail_scan_run(db, scan_run_id, error_message=str(exc))
         raise HTTPException(
             status_code=502,
             detail={
