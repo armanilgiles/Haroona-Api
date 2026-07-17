@@ -8,6 +8,10 @@ from app.curation.shopify_collection import (
     build_candidate_payload_result,
 )
 from app.curation.shopify_image_selection import ShopifyImageSelection
+from app.curation.storefront_discovery import (
+    DiscoveryAttempt,
+    StorefrontDiscoveryResult,
+)
 
 
 def _shopify_product(product_id: int, *, valid: bool = True) -> dict:
@@ -27,6 +31,21 @@ def _sold_out_shopify_product(product_id: int) -> dict:
     product["title"] = "Playful Printed Smock Mini Dress"
     product["tags"] = ["volume", "skirt", "cute", "statement"]
     product["variants"] = [{"price": "89.00", "available": False}]
+    return product
+
+
+def _editorial_brand_product(product_id: int) -> dict:
+    product = _shopify_product(product_id)
+    product["title"] = "Diane von Furstenberg Silk Wrap Dress"
+    product["vendor"] = "Diane von Furstenberg"
+    product["body_html"] = "A structured silk wrap dress."
+    return product
+
+
+def _low_platform_high_city_product(product_id: int) -> dict:
+    product = _shopify_product(product_id)
+    product["title"] = "FASHNZFAB Asymmetrical Technical Layered Utility Dress"
+    product["vendor"] = "FASHNZFAB"
     return product
 
 
@@ -56,7 +75,44 @@ class ShopifyCollectionScanTests(unittest.TestCase):
         self.assertEqual(len(result.products), 260)
         self.assertEqual(result.pages_scanned, 2)
         self.assertFalse(result.source_truncated)
+        self.assertEqual(result.discovery_method, "shopify_collection_json")
+        self.assertFalse(result.fallback_used)
         self.assertIn("page=2", mock_get.call_args_list[1].args[0])
+
+    @patch("app.curation.shopify_collection.discover_storefront_products")
+    @patch("app.curation.shopify_collection.requests.get")
+    def test_uses_storefront_fallback_when_shopify_json_is_unavailable(
+        self,
+        mock_get,
+        mock_discover,
+    ):
+        mock_get.return_value = Mock(status_code=404)
+        mock_discover.return_value = StorefrontDiscoveryResult(
+            products=[_shopify_product(1)],
+            discovery_method="product_page_crawl",
+            pages_scanned=2,
+            source_truncated=False,
+            attempts=(
+                DiscoveryAttempt(
+                    method="public_storefront_html",
+                    status="succeeded",
+                    detail="The public collection page was fetched.",
+                ),
+                DiscoveryAttempt(
+                    method="product_page_crawl",
+                    status="succeeded",
+                    detail="Parsed one product page.",
+                ),
+            ),
+        )
+
+        result = _fetch_shopify_collection_result(self.options)
+
+        self.assertTrue(result.fallback_used)
+        self.assertEqual(result.discovery_method, "product_page_crawl")
+        self.assertEqual(result.pages_scanned, 2)
+        self.assertIn("used public product pages", result.warnings[0])
+        self.assertEqual(result.discovery_attempts[-1]["status"], "succeeded")
 
     @patch("app.curation.shopify_collection.select_shopify_product_image")
     @patch("app.curation.shopify_collection._fetch_shopify_collection_result")
@@ -134,6 +190,40 @@ class ShopifyCollectionScanTests(unittest.TestCase):
         self.assertEqual(result.skipped_ineligible_products, 1)
         self.assertEqual(result.ineligible_reason_counts, {"out_of_stock": 1})
         self.assertEqual(mock_select_image.call_count, 2)
+
+    @patch("app.curation.shopify_collection.select_shopify_product_image")
+    @patch("app.curation.shopify_collection._fetch_shopify_collection_result")
+    def test_platform_ready_candidate_ranks_before_high_city_fit_low_trust_item(
+        self,
+        mock_fetch,
+        mock_select_image,
+    ):
+        options = CollectionScanOptions(
+            source_url=self.options.source_url,
+            merchant_name=self.options.merchant_name,
+            target_city_slug="tokyo",
+            limit=1,
+            image_mode="smart",
+        )
+        mock_fetch.return_value = ShopifyFetchResult(
+            products=[
+                _low_platform_high_city_product(1),
+                _editorial_brand_product(2),
+            ],
+            pages_scanned=1,
+            source_truncated=False,
+        )
+        mock_select_image.return_value = ShopifyImageSelection(
+            url="https://cdn.example.com/2.jpg",
+            score=80,
+            candidates_checked=1,
+        )
+
+        result = build_candidate_payload_result(options)
+
+        self.assertEqual(len(result.payloads), 1)
+        self.assertEqual(result.payloads[0].external_product_id, "2")
+        self.assertGreaterEqual(result.payloads[0].platform_alignment_score, 7)
 
 
 if __name__ == "__main__":

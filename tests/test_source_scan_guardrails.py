@@ -5,6 +5,10 @@ from app.curation.source_scan_guardrails import (
     get_merchant_source_guidance,
     normalize_category_hint,
 )
+from app.curation.scanner_registry import (
+    UnsupportedScannerError,
+    detect_curation_scanner,
+)
 
 
 class SourceScanGuardrailTests(unittest.TestCase):
@@ -76,6 +80,22 @@ class SourceScanGuardrailTests(unittest.TestCase):
             ("fast", "smart", "model_only"),
         )
         self.assertEqual(default_mode, "smart")
+
+    def test_generic_public_storefront_uses_catch_all_scanner(self):
+        scanner = detect_curation_scanner(
+            "https://example-boutique.com/category/summer-dresses"
+        )
+
+        self.assertEqual(scanner.name, "generic_storefront")
+        self.assertEqual(scanner.source, "storefront")
+        self.assertEqual(
+            scanner.supported_image_modes,
+            ("fast", "smart", "model_only"),
+        )
+
+    def test_private_network_storefront_is_rejected(self):
+        with self.assertRaises(UnsupportedScannerError):
+            detect_curation_scanner("http://127.0.0.1:8000/collections/private")
 
     def test_lilysilk_reports_fast_and_smart_image_modes(self):
         supported_modes, default_mode = get_scanner_image_capabilities(

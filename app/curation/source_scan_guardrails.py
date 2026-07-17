@@ -20,6 +20,7 @@ FALLBACK_CATEGORIES = (
 
 SCANNER_IMAGE_CAPABILITIES: dict[str, tuple[tuple[str, ...], str]] = {
     "shopify_collection": (("fast", "smart", "model_only"), "smart"),
+    "generic_storefront": (("fast", "smart", "model_only"), "smart"),
     "shopcider_category": (("fast", "smart", "model_only"), "smart"),
     "shopcider_collection": (("fast", "smart", "model_only"), "smart"),
     "lilysilk_category": (("fast", "smart"), "smart"),

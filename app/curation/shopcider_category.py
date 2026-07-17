@@ -20,12 +20,14 @@ except ImportError:  # pragma: no cover - optional image-quality scoring depende
     ImageStat = None
 
 from app.curation.eligibility import add_reason_counts, evaluate_candidate_eligibility
-from app.curation.scoring import score_city_fit
+from app.curation.platform_alignment import score_platform_alignment
+from app.curation.scoring import HYBRID_SCORING_VERSION, score_city_fit
 from app.curation.shopify_collection import (
     USER_AGENT,
     CandidatePayload,
     CollectionScanOptions,
     build_scan_summary,
+    candidate_review_rank,
     _normalize_category,
     _parse_decimal,
     _strip_html,
@@ -1130,6 +1132,7 @@ def build_shopcider_candidate_payload_result(options: CollectionScanOptions) -> 
             normalized_category=normalized_category,
             merchant_name=options.merchant_name,
             merchant_profile_allowed=options.merchant_profile_allowed,
+            brand_name=product.get("brand_name") or options.merchant_name,
         )
 
         image_candidates = _image_candidates_for_product(
@@ -1173,6 +1176,19 @@ def build_shopcider_candidate_payload_result(options: CollectionScanOptions) -> 
             price_amount=price_amount,
             currency=currency,
         )
+        platform_alignment = score_platform_alignment(
+            title=title,
+            description=description,
+            product_type=product_type,
+            tags=tags,
+            merchant_name=options.merchant_name,
+            brand_name=product.get("brand_name") or options.merchant_name,
+            merchant_verification=options.merchant_verification,
+            image_url=image_url,
+            image_quality_score=None,
+            normalized_category=normalized_category,
+            city_fit_score=score.score,
+        )
 
         payloads.append(
             CandidatePayload(
@@ -1199,14 +1215,14 @@ def build_shopcider_candidate_payload_result(options: CollectionScanOptions) -> 
                 merchant_profile_key=score.merchant_profile_key,
                 eligibility_status=final_eligibility.status,
                 eligibility_reasons=final_eligibility.reasons,
-                platform_alignment_score=None,
-                platform_alignment_reasons=[],
+                platform_alignment_score=platform_alignment.score,
+                platform_alignment_reasons=platform_alignment.reasons,
                 city_fit_score=score.score,
-                city_fit_scores={options.target_city_slug: score.score},
-                secondary_city_slug=None,
-                scoring_confidence=None,
+                city_fit_scores=score.city_fit_scores or {options.target_city_slug: score.score},
+                secondary_city_slug=score.secondary_city_slug,
+                scoring_confidence=score.confidence,
                 scoring_method="deterministic_rules",
-                scoring_version="rules_v1",
+                scoring_version=HYBRID_SCORING_VERSION,
                 haroona_score=score.score,
                 score_reasons=score.reasons,
                 review_notes=(
@@ -1219,7 +1235,7 @@ def build_shopcider_candidate_payload_result(options: CollectionScanOptions) -> 
             )
         )
 
-    payloads.sort(key=lambda item: item.haroona_score, reverse=True)
+    payloads.sort(key=candidate_review_rank, reverse=True)
     limited_payloads = payloads[: options.limit]
 
     return ShopCiderBuildResult(

@@ -6,6 +6,10 @@ from sqlalchemy import exists
 from sqlalchemy.orm import Query, Session
 
 from app.curation.eligibility import INELIGIBLE, evaluate_candidate_eligibility
+from app.curation.platform_alignment import (
+    PLATFORM_ALIGNMENT_THRESHOLD,
+    platform_alignment_passes,
+)
 from app.models import Product, ProductCandidate
 
 
@@ -114,6 +118,20 @@ def _refresh_candidate_eligibility(candidate: ProductCandidate):
     return result
 
 
+def _require_platform_alignment(candidate: ProductCandidate, action: str) -> None:
+    if platform_alignment_passes(candidate.platform_alignment_score):
+        return
+    if candidate.platform_alignment_score is None:
+        raise CandidateTransitionError(
+            f"Candidate must be rescored with Batch 3 before it can be {action}"
+        )
+    raise CandidateTransitionError(
+        "Candidate platform alignment "
+        f"{candidate.platform_alignment_score}/10 is below the "
+        f"{PLATFORM_ALIGNMENT_THRESHOLD}/10 threshold"
+    )
+
+
 def approve_candidate(
     db: Session,
     candidate: ProductCandidate,
@@ -127,6 +145,7 @@ def approve_candidate(
         raise CandidateTransitionError(
             f"Candidate is not eligible for approval: {reasons}"
         )
+    _require_platform_alignment(candidate, "approved")
     candidate.review_status = "approved"
     candidate.reviewed_by = reviewed_by
     candidate.reviewed_at = datetime.now(timezone.utc)
@@ -227,6 +246,7 @@ def restore_candidate(
             raise CandidateTransitionError(
                 f"Candidate is not eligible to restore live: {reasons}"
             )
+        _require_platform_alignment(candidate, "restored live")
         if not restored_product_id or not product:
             raise CandidateTransitionError(
                 "Only previously published candidates can be restored live"

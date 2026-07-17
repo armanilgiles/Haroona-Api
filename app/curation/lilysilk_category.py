@@ -16,13 +16,15 @@ from app.curation.eligibility import (
     blocking_reasons_only,
     evaluate_candidate_eligibility,
 )
-from app.curation.scoring import score_city_fit
+from app.curation.platform_alignment import score_platform_alignment
+from app.curation.scoring import HYBRID_SCORING_VERSION, score_city_fit
 from app.curation.shopify_collection import (
     USER_AGENT,
     CandidatePayload,
     CollectionScanOptions,
     _normalize_category,
     build_scan_summary,
+    candidate_review_rank,
     upsert_product_candidates,
 )
 from app.curation.shopify_image_selection import (
@@ -69,6 +71,8 @@ class LilySilkFetchResult:
 class LilySilkCandidateDraft:
     payload: CandidatePayload
     image_candidates: list[ShopifyImageCandidate]
+    product_type: str | None
+    tags: list[str]
 
 
 @dataclass(frozen=True)
@@ -474,6 +478,7 @@ def _build_candidate_draft(
         options.normalized_category,
     )
     description = str(product.get("description") or "").strip() or None
+    brand_name = str(product.get("brand_name") or "").strip() or options.merchant_name
     score = score_city_fit(
         title=title,
         description=description,
@@ -483,6 +488,7 @@ def _build_candidate_draft(
         normalized_category=normalized_category,
         merchant_name=options.merchant_name,
         merchant_profile_allowed=options.merchant_profile_allowed,
+        brand_name=brand_name,
     )
     price_amount, currency = _price_from_product(product)
     schema_availability = str(product.get("schema_availability") or "").lower()
@@ -505,6 +511,21 @@ def _build_candidate_draft(
         require_image=False,
     )
 
+    image_candidates = _image_candidates(product, title)
+    preliminary_platform_alignment = score_platform_alignment(
+        title=title,
+        description=description,
+        product_type=product_type,
+        tags=tags,
+        merchant_name=options.merchant_name,
+        brand_name=brand_name,
+        merchant_verification=options.merchant_verification,
+        image_url=image_candidates[0].url if image_candidates else None,
+        image_quality_score=None,
+        normalized_category=normalized_category,
+        city_fit_score=score.score,
+    )
+
     return LilySilkCandidateDraft(
         payload=CandidatePayload(
             source=options.source,
@@ -512,9 +533,7 @@ def _build_candidate_draft(
             source_url=source_url,
             scan_run_id=options.scan_run_id,
             merchant_name=options.merchant_name,
-            brand_name=(
-                str(product.get("brand_name") or "").strip() or options.merchant_name
-            ),
+            brand_name=brand_name,
             external_product_id=external_id,
             title=title,
             description=description,
@@ -532,14 +551,14 @@ def _build_candidate_draft(
             merchant_profile_key=score.merchant_profile_key,
             eligibility_status=eligibility.status,
             eligibility_reasons=eligibility.reasons,
-            platform_alignment_score=None,
-            platform_alignment_reasons=[],
+            platform_alignment_score=preliminary_platform_alignment.score,
+            platform_alignment_reasons=preliminary_platform_alignment.reasons,
             city_fit_score=score.score,
-            city_fit_scores={options.target_city_slug: score.score},
-            secondary_city_slug=None,
-            scoring_confidence=None,
+            city_fit_scores=score.city_fit_scores or {options.target_city_slug: score.score},
+            secondary_city_slug=score.secondary_city_slug,
+            scoring_confidence=score.confidence,
             scoring_method="deterministic_rules",
-            scoring_version="rules_v1",
+            scoring_version=HYBRID_SCORING_VERSION,
             haroona_score=score.score,
             score_reasons=score.reasons,
             review_notes=(
@@ -547,7 +566,9 @@ def _build_candidate_draft(
                 or None
             ),
         ),
-        image_candidates=_image_candidates(product, title),
+        image_candidates=image_candidates,
+        product_type=product_type,
+        tags=tags,
     )
 
 
@@ -581,7 +602,7 @@ def build_lilysilk_candidate_payload_result(
             continue
         drafts.append(draft)
 
-    drafts.sort(key=lambda item: item.payload.haroona_score, reverse=True)
+    drafts.sort(key=lambda item: candidate_review_rank(item.payload), reverse=True)
     payloads: list[CandidatePayload] = []
     skipped_missing_images = 0
     image_candidates_checked = 0
@@ -612,12 +633,27 @@ def build_lilysilk_candidate_payload_result(
             price_amount=draft.payload.price_amount,
             currency=draft.payload.currency,
         )
+        platform_alignment = score_platform_alignment(
+            title=draft.payload.title,
+            description=draft.payload.description,
+            product_type=draft.product_type,
+            tags=draft.tags,
+            merchant_name=draft.payload.merchant_name,
+            brand_name=draft.payload.brand_name,
+            merchant_verification=draft.payload.merchant_verification,
+            image_url=selection.url,
+            image_quality_score=selection.score,
+            normalized_category=draft.payload.normalized_category,
+            city_fit_score=draft.payload.city_fit_score,
+        )
         payloads.append(
             replace(
                 draft.payload,
                 image_url=selection.url,
                 eligibility_status=eligibility.status,
                 eligibility_reasons=eligibility.reasons,
+                platform_alignment_score=platform_alignment.score,
+                platform_alignment_reasons=platform_alignment.reasons,
             )
         )
 

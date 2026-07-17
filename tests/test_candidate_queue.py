@@ -81,6 +81,9 @@ class CandidateQueueTests(unittest.TestCase):
             availability="in_stock",
             normalized_category="dress",
             target_city_slug="london",
+            platform_alignment_score=8,
+            city_fit_score=90,
+            city_fit_scores={"london": 90},
             haroona_score=90,
             score_reasons=[],
             review_status=review_status,
@@ -203,6 +206,21 @@ class CandidateQueueTests(unittest.TestCase):
         self.assertIn("out_of_stock", str(raised.exception))
         self.assertEqual(candidate.review_status, "pending")
         self.assertEqual(candidate.eligibility_status, "ineligible")
+
+    def test_candidate_below_platform_threshold_cannot_be_approved(self):
+        candidate = self._candidate("low-platform", review_status="pending")
+        candidate.platform_alignment_score = 6.9
+        self.db.commit()
+
+        with self.assertRaises(CandidateTransitionError) as raised:
+            approve_candidate(
+                self.db,
+                candidate,
+                reviewed_by="test-curator",
+            )
+
+        self.assertIn("below the 7.0/10 threshold", str(raised.exception))
+        self.assertEqual(candidate.review_status, "pending")
 
 
 if __name__ == "__main__":

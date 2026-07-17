@@ -15,13 +15,21 @@ from app.curation.eligibility import (
     blocking_reasons_only,
     evaluate_candidate_eligibility,
 )
-from app.curation.scoring import score_city_fit
+from app.curation.platform_alignment import (
+    platform_alignment_passes,
+    score_platform_alignment,
+)
+from app.curation.scoring import HYBRID_SCORING_VERSION, score_city_fit
 from app.curation.shopify_image_selection import (
     ShopifyImageCandidate,
     ShopifyImageSelectionCache,
     image_candidates_from_shopify_product,
     normalize_image_mode,
     select_shopify_product_image,
+)
+from app.curation.storefront_discovery import (
+    StorefrontDiscoveryError,
+    discover_storefront_products,
 )
 from app.models import ProductCandidate
 
@@ -94,12 +102,23 @@ class ShopifyFetchResult:
     pages_scanned: int
     source_truncated: bool
     warnings: tuple[str, ...] = ()
+    discovery_method: str = "shopify_collection_json"
+    fallback_used: bool = False
+    discovery_attempts: tuple[dict[str, str], ...] = ()
+
+
+class CollectionDiscoveryError(RuntimeError):
+    def __init__(self, message: str, *, attempts: list[dict[str, str]]) -> None:
+        super().__init__(message)
+        self.attempts = tuple(attempts)
 
 
 @dataclass(frozen=True)
 class ShopifyCandidateDraft:
     payload: CandidatePayload
     image_candidates: list[ShopifyImageCandidate]
+    product_type: str | None
+    tags: list[str]
 
 
 @dataclass(frozen=True)
@@ -115,6 +134,9 @@ class ShopifyBuildResult:
     source_truncated: bool
     image_candidates_checked: int
     warnings: tuple[str, ...] = ()
+    discovery_method: str = "shopify_collection_json"
+    fallback_used: bool = False
+    discovery_attempts: tuple[dict[str, str], ...] = ()
 
 
 def _strip_html(value: str | None) -> str | None:
@@ -167,7 +189,10 @@ def _json_endpoint_candidates(source_url: str, *, page: int = 1) -> list[str]:
     source_url = _clean_collection_source_url(source_url)
     parsed = urlparse(source_url)
     origin = f"{parsed.scheme}://{parsed.netloc}"
-    handle = _collection_handle_from_url(source_url)
+    try:
+        handle = _collection_handle_from_url(source_url)
+    except ValueError:
+        return []
     locale_prefix = _locale_prefix_from_url(source_url)
 
     candidates = []
@@ -243,10 +268,20 @@ def _fetch_shopify_collection_result(options: CollectionScanOptions) -> ShopifyF
         "Accept": "application/json,text/html;q=0.9,*/*;q=0.8",
     }
 
-    last_error: Exception | None = None
+    discovery_attempts: list[dict[str, str]] = []
     selected_endpoint: str | None = None
     first_page_products: list[dict[str, Any]] | None = None
-    for endpoint in _json_endpoint_candidates(options.source_url, page=1):
+    json_endpoints = _json_endpoint_candidates(options.source_url, page=1)
+    if not json_endpoints:
+        discovery_attempts.append(
+            {
+                "method": "shopify_collection_json",
+                "status": "not_applicable",
+                "detail": "The source URL does not expose a standard Shopify collection path.",
+            }
+        )
+
+    for endpoint in json_endpoints:
         try:
             response = requests.get(
                 endpoint,
@@ -254,23 +289,80 @@ def _fetch_shopify_collection_result(options: CollectionScanOptions) -> ShopifyF
                 timeout=options.request_timeout_seconds,
             )
             if response.status_code >= 400:
+                discovery_attempts.append(
+                    {
+                        "method": "shopify_collection_json",
+                        "status": "failed",
+                        "detail": f"A Shopify JSON endpoint returned HTTP {response.status_code}.",
+                    }
+                )
                 continue
             payload = response.json()
             products = payload.get("products")
-            if isinstance(products, list):
+            if isinstance(products, list) and products:
                 selected_endpoint = endpoint
                 first_page_products = products
+                discovery_attempts.append(
+                    {
+                        "method": "shopify_collection_json",
+                        "status": "succeeded",
+                        "detail": f"Found {len(products)} product record(s) on the first JSON page.",
+                    }
+                )
                 break
+            discovery_attempts.append(
+                {
+                    "method": "shopify_collection_json",
+                    "status": "no_data",
+                    "detail": "A Shopify JSON endpoint did not contain a non-empty products list.",
+                }
+            )
         except Exception as exc:  # noqa: BLE001 - CLI should surface final failure cleanly
-            last_error = exc
+            discovery_attempts.append(
+                {
+                    "method": "shopify_collection_json",
+                    "status": "failed",
+                    "detail": f"A Shopify JSON endpoint could not be parsed: {exc}",
+                }
+            )
 
     if selected_endpoint is None or first_page_products is None:
-        if last_error:
-            raise RuntimeError(
-                f"Could not fetch Shopify collection JSON: {last_error}"
-            ) from last_error
+        try:
+            storefront_result = discover_storefront_products(
+                _clean_collection_source_url(options.source_url),
+                headers=headers,
+                timeout_seconds=options.request_timeout_seconds,
+                max_products=max(options.limit * 4, 25),
+            )
+        except StorefrontDiscoveryError as exc:
+            discovery_attempts.extend(attempt.as_dict() for attempt in exc.attempts)
+            raise CollectionDiscoveryError(
+                "Haroona could not discover products using Shopify JSON, embedded "
+                "storefront data, or public product pages.",
+                attempts=discovery_attempts,
+            ) from exc
 
-        raise RuntimeError("Could not fetch Shopify collection JSON from known endpoints")
+        discovery_attempts.extend(
+            attempt.as_dict() for attempt in storefront_result.attempts
+        )
+        fallback_label = {
+            "embedded_storefront_data": "embedded storefront data",
+            "product_page_crawl": "public product pages",
+        }.get(storefront_result.discovery_method, storefront_result.discovery_method)
+        warnings = [
+            "Shopify collection JSON was unavailable; "
+            f"Haroona used {fallback_label} instead.",
+            *storefront_result.warnings,
+        ]
+        return ShopifyFetchResult(
+            products=storefront_result.products,
+            pages_scanned=storefront_result.pages_scanned,
+            source_truncated=storefront_result.source_truncated,
+            warnings=tuple(warnings),
+            discovery_method=storefront_result.discovery_method,
+            fallback_used=True,
+            discovery_attempts=tuple(discovery_attempts),
+        )
 
     products: list[dict[str, Any]] = []
     seen_product_ids: set[str] = set()
@@ -329,6 +421,9 @@ def _fetch_shopify_collection_result(options: CollectionScanOptions) -> ShopifyF
         pages_scanned=pages_scanned,
         source_truncated=source_truncated,
         warnings=tuple(warnings),
+        discovery_method="shopify_collection_json",
+        fallback_used=False,
+        discovery_attempts=tuple(discovery_attempts),
     )
 
 
@@ -351,7 +446,9 @@ def _build_candidate_draft(
     variants = product.get("variants") or []
     variant = _choose_variant(variants)
     price_amount = _parse_decimal(variant.get("price") if variant else None)
-    currency = "USD" if "/en-us/" in clean_source_url else None
+    currency = product.get("_currency") or (
+        "USD" if "/en-us/" in clean_source_url else None
+    )
     availability = (
         "in_stock"
         if any(v.get("available") is True for v in variants)
@@ -360,19 +457,25 @@ def _build_candidate_draft(
 
     description = _strip_html(product.get("body_html"))
     product_type = product.get("product_type")
-    tags = product.get("tags") or []
+    raw_tags = product.get("tags") or []
+    tags = raw_tags if isinstance(raw_tags, list) else []
     normalized_category = _normalize_category(title, product_type, options.normalized_category)
-    merchant_url = _build_product_url(clean_source_url, handle)
+    merchant_url = product.get("_merchant_url") or _build_product_url(
+        clean_source_url,
+        handle,
+    )
+    brand_name = product.get("vendor") or options.merchant_name
 
     score = score_city_fit(
         title=title,
         description=description,
         product_type=product_type,
-        tags=tags if isinstance(tags, list) else [],
+        tags=tags,
         target_city_slug=options.target_city_slug,
         normalized_category=normalized_category,
         merchant_name=options.merchant_name,
         merchant_profile_allowed=options.merchant_profile_allowed,
+        brand_name=brand_name,
     )
     eligibility = evaluate_candidate_eligibility(
         title=title,
@@ -386,6 +489,21 @@ def _build_candidate_draft(
         require_image=False,
     )
 
+    image_candidates = image_candidates_from_shopify_product(product)
+    preliminary_platform_alignment = score_platform_alignment(
+        title=title,
+        description=description,
+        product_type=product_type,
+        tags=tags,
+        merchant_name=options.merchant_name,
+        brand_name=brand_name,
+        merchant_verification=options.merchant_verification,
+        image_url=image_candidates[0].url if image_candidates else None,
+        image_quality_score=None,
+        normalized_category=normalized_category,
+        city_fit_score=score.score,
+    )
+
     return ShopifyCandidateDraft(
         payload=CandidatePayload(
             source=options.source,
@@ -393,7 +511,7 @@ def _build_candidate_draft(
             source_url=clean_source_url,
             scan_run_id=options.scan_run_id,
             merchant_name=options.merchant_name,
-            brand_name=product.get("vendor") or options.merchant_name,
+            brand_name=brand_name,
             external_product_id=external_id,
             title=title,
             description=description,
@@ -411,14 +529,14 @@ def _build_candidate_draft(
             merchant_profile_key=score.merchant_profile_key,
             eligibility_status=eligibility.status,
             eligibility_reasons=eligibility.reasons,
-            platform_alignment_score=None,
-            platform_alignment_reasons=[],
+            platform_alignment_score=preliminary_platform_alignment.score,
+            platform_alignment_reasons=preliminary_platform_alignment.reasons,
             city_fit_score=score.score,
-            city_fit_scores={options.target_city_slug: score.score},
-            secondary_city_slug=None,
-            scoring_confidence=None,
+            city_fit_scores=score.city_fit_scores or {options.target_city_slug: score.score},
+            secondary_city_slug=score.secondary_city_slug,
+            scoring_confidence=score.confidence,
             scoring_method="deterministic_rules",
-            scoring_version="rules_v1",
+            scoring_version=HYBRID_SCORING_VERSION,
             haroona_score=score.score,
             score_reasons=score.reasons,
             review_notes=(
@@ -426,7 +544,9 @@ def _build_candidate_draft(
                 or None
             ),
         ),
-        image_candidates=image_candidates_from_shopify_product(product),
+        image_candidates=image_candidates,
+        product_type=product_type,
+        tags=tags,
     )
 
 
@@ -456,7 +576,7 @@ def build_candidate_payload_result(options: CollectionScanOptions) -> ShopifyBui
             continue
         drafts.append(draft)
 
-    drafts.sort(key=lambda item: item.payload.haroona_score, reverse=True)
+    drafts.sort(key=lambda item: candidate_review_rank(item.payload), reverse=True)
     payloads: list[CandidatePayload] = []
     skipped_missing_images = 0
     image_candidates_checked = 0
@@ -488,12 +608,27 @@ def build_candidate_payload_result(options: CollectionScanOptions) -> ShopifyBui
             price_amount=draft.payload.price_amount,
             currency=draft.payload.currency,
         )
+        platform_alignment = score_platform_alignment(
+            title=draft.payload.title,
+            description=draft.payload.description,
+            product_type=draft.product_type,
+            tags=draft.tags,
+            merchant_name=draft.payload.merchant_name,
+            brand_name=draft.payload.brand_name,
+            merchant_verification=draft.payload.merchant_verification,
+            image_url=selection.url,
+            image_quality_score=selection.score,
+            normalized_category=draft.payload.normalized_category,
+            city_fit_score=draft.payload.city_fit_score,
+        )
         payloads.append(
             replace(
                 draft.payload,
                 image_url=selection.url,
                 eligibility_status=eligibility.status,
                 eligibility_reasons=eligibility.reasons,
+                platform_alignment_score=platform_alignment.score,
+                platform_alignment_reasons=platform_alignment.reasons,
             )
         )
 
@@ -510,11 +645,23 @@ def build_candidate_payload_result(options: CollectionScanOptions) -> ShopifyBui
         source_truncated=fetch_result.source_truncated,
         image_candidates_checked=image_candidates_checked,
         warnings=fetch_result.warnings,
+        discovery_method=fetch_result.discovery_method,
+        fallback_used=fetch_result.fallback_used,
+        discovery_attempts=fetch_result.discovery_attempts,
     )
 
 
 def build_candidate_payloads(options: CollectionScanOptions) -> list[CandidatePayload]:
     return build_candidate_payload_result(options).payloads
+
+
+def candidate_review_rank(payload: CandidatePayload) -> tuple[int, Decimal, int]:
+    platform_score = payload.platform_alignment_score or Decimal("0")
+    return (
+        1 if platform_alignment_passes(platform_score) else 0,
+        platform_score,
+        payload.city_fit_score,
+    )
 
 
 def _candidate_dedupe_key(payload: CandidatePayload) -> tuple[str, str]:
@@ -649,6 +796,9 @@ def build_scan_summary(
     pages_scanned: int | None = None,
     source_truncated: bool = False,
     image_candidates_checked: int | None = None,
+    discovery_method: str | None = None,
+    fallback_used: bool = False,
+    discovery_attempts: tuple[dict[str, str], ...] = (),
 ) -> dict[str, Any]:
     saved_count = created_count + updated_count
     skipped_total = (
@@ -691,6 +841,12 @@ def build_scan_summary(
         summary["pages_scanned"] = pages_scanned
     if image_candidates_checked is not None:
         summary["image_candidates_checked"] = image_candidates_checked
+    if discovery_method:
+        summary["discovery"] = {
+            "method": discovery_method,
+            "fallback_used": fallback_used,
+            "attempts": list(discovery_attempts),
+        }
     summary["source_truncated"] = source_truncated
     return summary
 
@@ -715,6 +871,9 @@ def scan_and_save_shopify_collection(db: Session, options: CollectionScanOptions
         pages_scanned=build_result.pages_scanned,
         source_truncated=build_result.source_truncated,
         image_candidates_checked=build_result.image_candidates_checked,
+        discovery_method=build_result.discovery_method,
+        fallback_used=build_result.fallback_used,
+        discovery_attempts=build_result.discovery_attempts,
     )
     return {
         "status": "ok",
@@ -726,6 +885,7 @@ def scan_and_save_shopify_collection(db: Session, options: CollectionScanOptions
         "found": len(payloads),
         **counts,
         "summary": summary,
+        "discovery": summary.get("discovery"),
         "warnings": list(build_result.warnings),
         "items": [
             {

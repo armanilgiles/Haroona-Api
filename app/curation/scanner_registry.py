@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import re
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -26,11 +27,21 @@ SUPPORTED_SCANNER_EXAMPLES = (
     "ShopCider category URL like https://www.shopcider.com/category/maxi-dresses-cid-3587",
     "ShopCider collection URL like https://www.shopcider.com/collection/top",
     "LILYSILK category URL like https://www.lilysilk.com/us/category/womentops.html",
+    "Public collection, category, or listing URL that exposes structured products or product links",
 )
 
 
 def _host_matches(host: str, domain: str) -> bool:
     return host == domain or host.endswith(f".{domain}")
+
+
+def _is_disallowed_host(host: str) -> bool:
+    if host in {"localhost", "localhost.localdomain"}:
+        return True
+    try:
+        return not ipaddress.ip_address(host).is_global
+    except ValueError:
+        return False
 
 
 @dataclass(frozen=True)
@@ -73,11 +84,16 @@ class UnsupportedScannerError(ValueError):
 def detect_curation_scanner(source_url: str) -> ScannerMatch:
     """Pick the right product scanner based on the submitted Curate Studio URL."""
     parsed = urlparse(source_url.strip())
-    host = parsed.netloc.lower()
+    host = (parsed.hostname or "").lower()
     path = parsed.path.lower()
 
     if parsed.scheme not in {"http", "https"} or not host:
         raise UnsupportedScannerError(source_url, "The URL must include http(s) and a domain.")
+    if _is_disallowed_host(host):
+        raise UnsupportedScannerError(
+            source_url,
+            "Private and local network addresses cannot be scanned.",
+        )
 
     if _host_matches(host, "shopcider.com"):
         if _SHOPCIDER_CATEGORY_PATTERN.match(path):
@@ -140,4 +156,14 @@ def detect_curation_scanner(source_url: str) -> ScannerMatch:
             default_image_mode=default_image_mode,
         )
 
-    raise UnsupportedScannerError(source_url)
+    supported_image_modes, default_image_mode = get_scanner_image_capabilities(
+        "generic_storefront"
+    )
+    return ScannerMatch(
+        name="generic_storefront",
+        source="storefront",
+        source_type="collection",
+        scan=scan_and_save_shopify_collection,
+        supported_image_modes=supported_image_modes,
+        default_image_mode=default_image_mode,
+    )

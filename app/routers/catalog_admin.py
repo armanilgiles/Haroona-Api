@@ -6,7 +6,7 @@ from urllib.parse import urlparse, urlunparse
 from uuid import uuid4
 from pydantic import BaseModel, Field, field_validator
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func
+from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -45,7 +45,7 @@ from app.curation.scan_runs import (
     start_scan_run,
     update_scan_run_context,
 )
-from app.curation.shopify_collection import CollectionScanOptions
+from app.curation.shopify_collection import CollectionDiscoveryError, CollectionScanOptions
 from app.curation.source_scan_guardrails import (
     clean_merchant_name,
     get_merchant_source_guidance,
@@ -693,6 +693,21 @@ def scan_collection(
                 "suggestion": "Check the URL, city slug, merchant name, and selected image mode, then scan again.",
             },
         ) from exc
+    except CollectionDiscoveryError as exc:
+        fail_scan_run(db, scan_run_id, error_message=str(exc))
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "type": "collection_discovery_failed",
+                "message": str(exc),
+                "attempts": list(exc.attempts),
+                "suggestion": (
+                    "The store may block automated access or hide product data. "
+                    "Try another public collection/category URL from the same store; "
+                    "changing image mode will not repair product discovery."
+                ),
+            },
+        ) from exc
     except Exception as exc:
         fail_scan_run(db, scan_run_id, error_message=str(exc))
         raise HTTPException(
@@ -700,7 +715,10 @@ def scan_collection(
             detail={
                 "type": "collection_scan_failed",
                 "message": f"Collection scan failed: {exc}",
-                "suggestion": "Try Fast image mode first. If that works, rerun Smart or Model-only mode with a smaller limit.",
+                "suggestion": (
+                    "Review the recent scan error and verify that the collection URL is public. "
+                    "Image mode changes image selection after products are discovered."
+                ),
             },
         ) from exc
 
@@ -719,8 +737,14 @@ def list_product_candidates(
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ):
+    platform_ready = case(
+        (ProductCandidate.platform_alignment_score >= 7, 1),
+        else_=0,
+    )
     query = db.query(ProductCandidate).order_by(
+        platform_ready.desc(),
         ProductCandidate.city_fit_score.desc(),
+        ProductCandidate.platform_alignment_score.desc(),
         ProductCandidate.id.desc(),
     )
 

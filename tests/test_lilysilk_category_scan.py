@@ -9,6 +9,7 @@ from app.curation.lilysilk_category import (
     build_lilysilk_candidate_payload_result,
 )
 from app.curation.scanner_registry import detect_curation_scanner
+from app.curation.scoring import HYBRID_SCORING_VERSION
 from app.curation.shopify_collection import CollectionScanOptions
 from app.curation.shopify_image_selection import ShopifyImageSelection
 
@@ -136,6 +137,9 @@ class LilySilkCategoryScanTests(unittest.TestCase):
         self.assertEqual(candidate.currency, "USD")
         self.assertEqual(candidate.normalized_category, "tops")
         self.assertEqual(candidate.image_url, selected_image)
+        self.assertIsNotNone(candidate.platform_alignment_score)
+        self.assertEqual(candidate.scoring_version, HYBRID_SCORING_VERSION)
+        self.assertEqual(len(candidate.city_fit_scores), 12)
         self.assertEqual(
             mock_select_image.call_args.args[0][0].url,
             selected_image,
