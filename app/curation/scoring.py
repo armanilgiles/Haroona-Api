@@ -606,6 +606,7 @@ def score_city_fit(
     brand_name: str | None = None,
     season: str | None = None,
     occasion: str | None = None,
+    concept_overrides: tuple[dict[str, Any], ...] = (),
 ) -> ScoreResult:
     """Apply Haroona's deterministic, JSON-backed hybrid rubric.
 
@@ -626,6 +627,7 @@ def score_city_fit(
     evidence = recognize_fashion_evidence(
         combined_text,
         brand_name=brand_name,
+        concept_overrides=concept_overrides,
     )
     traits = _inferred_traits(
         evidence,

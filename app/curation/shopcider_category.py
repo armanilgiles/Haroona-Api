@@ -1133,6 +1133,7 @@ def build_shopcider_candidate_payload_result(options: CollectionScanOptions) -> 
             merchant_name=options.merchant_name,
             merchant_profile_allowed=options.merchant_profile_allowed,
             brand_name=product.get("brand_name") or options.merchant_name,
+            concept_overrides=options.concept_overrides,
         )
 
         image_candidates = _image_candidates_for_product(

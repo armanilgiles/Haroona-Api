@@ -14,9 +14,36 @@ import requests
 MAX_EMBEDDED_JSON_BYTES = 5_000_000
 MAX_STOREFRONT_PRODUCT_PAGES = 100
 _PRODUCT_PATH_PATTERN = re.compile(
-    r"/(?:products?|p|item)/[^/?#]+",
+    r"/(?:products?|p|item|goods|product-detail|productdetails?|pd)/[^/?#]+",
     re.IGNORECASE,
 )
+_PRODUCT_HINT_PATTERN = re.compile(
+    r"(?:^|[\s_-])(?:product|productcard|product-card|product-tile|pdp|sku|goods)(?:$|[\s_-])",
+    re.IGNORECASE,
+)
+_NON_PRODUCT_PATH_PARTS = {
+    "account",
+    "blog",
+    "blogs",
+    "cart",
+    "category",
+    "checkout",
+    "collections",
+    "contact",
+    "help",
+    "login",
+    "pages",
+    "register",
+    "search",
+    "stores",
+    "wishlist",
+}
+_JSON_SCRIPT_IDS = {
+    "__apollo_state__",
+    "__next_data__",
+    "__nuxt_data__",
+    "__remix_context__",
+}
 
 
 @dataclass(frozen=True)
@@ -59,10 +86,13 @@ class _StorefrontHtmlParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.scripts: list[tuple[str, str]] = []
-        self.links: list[str] = []
+        self.links: list[tuple[str, str]] = []
         self.meta: dict[str, str] = {}
         self._script_type: str | None = None
         self._script_chunks: list[str] = []
+        self._anchor_href: str | None = None
+        self._anchor_hints: list[str] = []
+        self._anchor_chunks: list[str] = []
 
     def handle_starttag(
         self,
@@ -73,12 +103,31 @@ class _StorefrontHtmlParser(HTMLParser):
         normalized_tag = tag.lower()
         if normalized_tag == "script":
             script_type = attr_map.get("type", "").lower()
-            if script_type in {"application/json", "application/ld+json"}:
-                self._script_type = script_type
+            script_id = attr_map.get("id", "").lower()
+            if (
+                script_type in {"application/json", "application/ld+json"}
+                or script_id in _JSON_SCRIPT_IDS
+                or (
+                    not attr_map.get("src")
+                    and script_type
+                    in {"", "text/javascript", "application/javascript"}
+                )
+            ):
+                self._script_type = script_type or script_id or "inline_javascript"
                 self._script_chunks = []
             return
         if normalized_tag == "a" and attr_map.get("href"):
-            self.links.append(attr_map["href"])
+            self._anchor_href = attr_map["href"]
+            self._anchor_hints = [
+                value
+                for key, value in attr_map.items()
+                if value
+                and (
+                    key in {"class", "id", "itemprop", "title", "aria-label"}
+                    or key.startswith("data-")
+                )
+            ]
+            self._anchor_chunks = []
             return
         if normalized_tag == "meta" and attr_map.get("content"):
             key = (attr_map.get("property") or attr_map.get("name") or "").lower()
@@ -88,9 +137,21 @@ class _StorefrontHtmlParser(HTMLParser):
     def handle_data(self, data: str) -> None:
         if self._script_type is not None:
             self._script_chunks.append(data)
+        if self._anchor_href is not None:
+            self._anchor_chunks.append(data)
 
     def handle_endtag(self, tag: str) -> None:
-        if tag.lower() != "script" or self._script_type is None:
+        normalized_tag = tag.lower()
+        if normalized_tag == "a" and self._anchor_href is not None:
+            hint = " ".join(
+                [*self._anchor_hints, " ".join(self._anchor_chunks)]
+            ).strip()
+            self.links.append((self._anchor_href, hint))
+            self._anchor_href = None
+            self._anchor_hints = []
+            self._anchor_chunks = []
+            return
+        if normalized_tag != "script" or self._script_type is None:
             return
         raw = "".join(self._script_chunks).strip()
         if raw and len(raw.encode("utf-8")) <= MAX_EMBEDDED_JSON_BYTES:
@@ -119,6 +180,70 @@ def _same_store_url(value: str, *, base_url: str) -> str | None:
     if candidate_host != base_host:
         return None
     return cleaned
+
+
+def _path_parts(value: str) -> list[str]:
+    return [part.lower() for part in urlparse(value).path.split("/") if part]
+
+
+def _candidate_product_url(
+    value: str,
+    *,
+    hint: str,
+    base_url: str,
+) -> str | None:
+    candidate = _same_store_url(value, base_url=base_url)
+    if not candidate:
+        return None
+
+    source = _clean_url(base_url, base_url=base_url)
+    if not source or candidate.rstrip("/") == source.rstrip("/"):
+        return None
+
+    candidate_path = urlparse(candidate).path
+    if _PRODUCT_PATH_PATTERN.search(candidate_path):
+        return candidate
+
+    candidate_parts = _path_parts(candidate)
+    if not candidate_parts or any(
+        part in _NON_PRODUCT_PATH_PARTS for part in candidate_parts[-2:]
+    ):
+        return None
+
+    # Product-card markup is a strong cross-platform signal even when a store
+    # uses opaque or localized URLs instead of /products/{handle}.
+    if _PRODUCT_HINT_PATTERN.search(hint):
+        return candidate
+
+    # Some storefronts (including many headless catalogs) place product pages
+    # directly below the current category path. These links remain candidates,
+    # then _fetch_product verifies product metadata before accepting them.
+    source_parts = _path_parts(source)
+    if (
+        len(candidate_parts) == len(source_parts) + 1
+        and candidate_parts[: len(source_parts)] == source_parts
+    ):
+        return candidate
+    return None
+
+
+def _json_document_from_script(raw: str) -> Any | None:
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    # A number of storefronts expose JSON as a small assignment such as
+    # window.__INITIAL_STATE__ = {...};. JSONDecoder.raw_decode lets us read
+    # the JSON value without attempting to execute JavaScript.
+    starts = [index for index in (raw.find("{"), raw.find("[")) if index >= 0]
+    if not starts:
+        return None
+    try:
+        document, _ = json.JSONDecoder().raw_decode(raw[min(starts) :])
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return document
 
 
 def _product_handle(product_url: str | None, fallback: Any = None) -> str:
@@ -376,9 +501,8 @@ def extract_storefront_page(html: str, *, base_url: str) -> StorefrontPageExtrac
     links: list[str] = []
 
     for _, raw in parser.scripts:
-        try:
-            document = json.loads(raw)
-        except (json.JSONDecodeError, TypeError):
+        document = _json_document_from_script(raw)
+        if document is None:
             continue
         products.extend(_products_from_document(document, base_url=base_url))
 
@@ -389,9 +513,13 @@ def extract_storefront_page(html: str, *, base_url: str) -> StorefrontPageExtrac
             if same_store:
                 links.append(same_store)
 
-    for raw_link in parser.links:
-        candidate = _same_store_url(raw_link, base_url=base_url)
-        if candidate and _PRODUCT_PATH_PATTERN.search(urlparse(candidate).path):
+    for raw_link, hint in parser.links:
+        candidate = _candidate_product_url(
+            raw_link,
+            hint=hint,
+            base_url=base_url,
+        )
+        if candidate:
             links.append(candidate)
 
     deduped_links = list(dict.fromkeys(links))
@@ -406,14 +534,23 @@ def _product_from_meta(html: str, *, product_url: str) -> dict[str, Any] | None:
     parser.feed(html)
     meta = parser.meta
     title = meta.get("og:title") or meta.get("twitter:title")
-    if not title:
+    image = meta.get("og:image") or meta.get("twitter:image")
+    product_signal = any(
+        (
+            meta.get("product:price:amount"),
+            meta.get("product:availability"),
+            meta.get("product:brand"),
+            meta.get("product:retailer_item_id"),
+        )
+    ) or meta.get("og:type", "").lower() == "product"
+    if not title or not image or not product_signal:
         return None
     return product_from_mapping(
         {
             "title": title,
             "url": meta.get("og:url") or product_url,
             "description": meta.get("og:description") or meta.get("description"),
-            "image": meta.get("og:image") or meta.get("twitter:image"),
+            "image": image,
             "price": meta.get("product:price:amount"),
             "priceCurrency": meta.get("product:price:currency"),
             "availability": meta.get("product:availability"),

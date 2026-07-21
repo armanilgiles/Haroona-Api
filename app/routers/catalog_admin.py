@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import logging
 from typing import Literal
 from urllib.parse import urlparse, urlunparse
 from uuid import uuid4
@@ -9,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
+from app.auth.dependencies import get_admin_user
 from app.database import get_db
 from app.models import (
     AwinProductNormalized,
@@ -17,8 +19,19 @@ from app.models import (
     City,
     CurationScanRun,
     CurationScanRunCandidate,
+    FashionConceptProposal,
     Product,
     ProductCandidate,
+)
+from app.curation.concept_learning import (
+    CONCEPT_CATEGORIES,
+    create_concept_from_proposal,
+    list_available_concepts,
+    load_runtime_concept_overrides,
+    map_proposal_to_concept,
+    proposal_payload,
+    record_unknown_concepts_for_scan,
+    reject_concept_proposal,
 )
 from app.curation.candidate_queue import (
     CandidateTransitionError,
@@ -28,6 +41,12 @@ from app.curation.candidate_queue import (
     reject_candidate,
     resolve_candidate_queue_status,
     restore_candidate,
+)
+from app.curation.affiliate_links import (
+    AffiliateLinkTransitionError,
+    resolve_candidate_workflow_status,
+    resolve_takeads_affiliate_link,
+    verify_candidate_affiliate_link,
 )
 from app.curation.product_candidate_publisher import (
     publish_approved_product_candidates,
@@ -45,13 +64,18 @@ from app.curation.scan_runs import (
     start_scan_run,
     update_scan_run_context,
 )
-from app.curation.shopify_collection import CollectionDiscoveryError, CollectionScanOptions
+from app.curation.shopify_collection import (
+    CollectionDiscoveryError,
+    CollectionRateLimitedError,
+    CollectionScanOptions,
+)
 from app.curation.source_scan_guardrails import (
     clean_merchant_name,
     get_merchant_source_guidance,
     normalize_category_hint,
 )
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin/catalog", tags=["admin-catalog"])
 
 
@@ -94,6 +118,11 @@ class ReviewCandidateRequest(BaseModel):
     reason: str | None = None
 
 
+class VerifyAffiliateLinkRequest(BaseModel):
+    verified: bool
+    verified_by: str = Field("curator-studio", min_length=2)
+
+
 class PublishCandidateRequest(BaseModel):
     published_by: str = Field("curator-studio", min_length=2)
 
@@ -112,6 +141,23 @@ class ArchiveCandidateRequest(BaseModel):
 class RestoreCandidateRequest(BaseModel):
     restored_by: str = Field("curator-studio", min_length=2)
     restore_to: str = Field("pending", min_length=2)
+
+
+class MapConceptProposalRequest(BaseModel):
+    concept_id: str = Field(..., min_length=1, max_length=120)
+    reviewed_by: str = Field("curator-studio", min_length=2)
+
+
+class CreateConceptProposalRequest(BaseModel):
+    label: str = Field(..., min_length=1, max_length=255)
+    concept_id: str | None = Field(None, max_length=120)
+    category: str = Field(..., min_length=2, max_length=80)
+    traits: list[str] = Field(default_factory=list, max_length=30)
+    reviewed_by: str = Field("curator-studio", min_length=2)
+
+
+class RejectConceptProposalRequest(BaseModel):
+    reviewed_by: str = Field("curator-studio", min_length=2)
 
 
 class BrandAssetResolveRequest(BaseModel):
@@ -644,9 +690,33 @@ def scan_collection(
             scan_run_id=scan_run_id,
             merchant_verification=merchant_guidance.verification,
             merchant_profile_allowed=merchant_guidance.verification == "verified",
+            concept_overrides=load_runtime_concept_overrides(db),
         )
 
         result = scanner.scan(db, options)
+        try:
+            concept_review = record_unknown_concepts_for_scan(db, scan_run_id)
+        except Exception:
+            # Concept proposals are an optional review aid. Product discovery and
+            # candidate saving have already committed, so this stage must never
+            # turn a successful collection scan into a 502 response.
+            db.rollback()
+            logger.exception(
+                "Concept proposal indexing failed for scan %s", scan_run_id
+            )
+            concept_review = {
+                "detected": 0,
+                "created": 0,
+                "updated": 0,
+                "skipped": 1,
+            }
+            warnings.append(
+                "Products were saved, but concept-review indexing was skipped "
+                "because of a temporary database conflict."
+            )
+        result["concept_review"] = concept_review
+        if isinstance(result.get("summary"), dict):
+            result["summary"]["concept_review"] = concept_review
         warnings.extend(result.get("warnings") or [])
         complete_scan_run(
             db,
@@ -693,6 +763,23 @@ def scan_collection(
                 "suggestion": "Check the URL, city slug, merchant name, and selected image mode, then scan again.",
             },
         ) from exc
+    except CollectionRateLimitedError as exc:
+        fail_scan_run(db, scan_run_id, error_message=str(exc))
+        raise HTTPException(
+            status_code=429,
+            headers={"Retry-After": str(exc.retry_after_seconds)},
+            detail={
+                "type": "collection_source_rate_limited",
+                "message": str(exc),
+                "attempts": list(exc.attempts),
+                "retry_after_seconds": exc.retry_after_seconds,
+                "suggestion": (
+                    "Wait for the displayed cooldown before requesting a fresh scan. "
+                    "If Haroona has a saved snapshot for this exact collection URL, "
+                    "it will reuse and rescore that snapshot automatically."
+                ),
+            },
+        ) from exc
     except CollectionDiscoveryError as exc:
         fail_scan_run(db, scan_run_id, error_message=str(exc))
         raise HTTPException(
@@ -709,18 +796,130 @@ def scan_collection(
             },
         ) from exc
     except Exception as exc:
-        fail_scan_run(db, scan_run_id, error_message=str(exc))
+        logger.exception("Collection scan %s failed", scan_run_id)
+        fail_scan_run(db, scan_run_id, error_message=type(exc).__name__)
         raise HTTPException(
             status_code=502,
             detail={
                 "type": "collection_scan_failed",
-                "message": f"Collection scan failed: {exc}",
+                "message": (
+                    "Collection scan failed during an internal processing step. "
+                    "No database query details were exposed."
+                ),
                 "suggestion": (
                     "Review the recent scan error and verify that the collection URL is public. "
                     "Image mode changes image selection after products are discovered."
                 ),
             },
         ) from exc
+
+
+@router.get("/fashion-concepts")
+def list_fashion_concepts(
+    search: str | None = Query(None),
+    limit: int = Query(500, ge=1, le=1000),
+    db: Session = Depends(get_db),
+):
+    items = list_available_concepts(db, search=search, limit=limit)
+    return {
+        "items": items,
+        "count": len(items),
+        "categories": list(CONCEPT_CATEGORIES),
+    }
+
+
+@router.get("/concept-proposals")
+def list_concept_proposals(
+    status: str = Query("pending"),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+):
+    normalized_status = status.strip().lower()
+    allowed_statuses = {"pending", "mapped", "created", "rejected", "all"}
+    if normalized_status not in allowed_statuses:
+        raise HTTPException(status_code=400, detail="Unsupported concept proposal status")
+    query = db.query(FashionConceptProposal)
+    if normalized_status != "all":
+        query = query.filter(FashionConceptProposal.status == normalized_status)
+    total = query.count()
+    rows = (
+        query.order_by(
+            FashionConceptProposal.occurrence_count.desc(),
+            FashionConceptProposal.last_seen_at.desc(),
+            FashionConceptProposal.id.desc(),
+        )
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+    return {"items": [proposal_payload(row) for row in rows], "count": total}
+
+
+@router.post("/concept-proposals/{proposal_id}/map")
+def map_concept_proposal(
+    proposal_id: int,
+    payload: MapConceptProposalRequest,
+    db: Session = Depends(get_db),
+):
+    try:
+        row = map_proposal_to_concept(
+            db,
+            proposal_id,
+            concept_id=payload.concept_id,
+            reviewed_by=payload.reviewed_by,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"status": "ok", "proposal": proposal_payload(row)}
+
+
+@router.post("/concept-proposals/{proposal_id}/create")
+def create_concept_proposal(
+    proposal_id: int,
+    payload: CreateConceptProposalRequest,
+    db: Session = Depends(get_db),
+):
+    try:
+        row = create_concept_from_proposal(
+            db,
+            proposal_id,
+            label=payload.label,
+            concept_id=payload.concept_id,
+            category=payload.category,
+            traits=payload.traits,
+            reviewed_by=payload.reviewed_by,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"status": "ok", "proposal": proposal_payload(row)}
+
+
+@router.post("/concept-proposals/{proposal_id}/reject")
+def reject_fashion_concept_proposal(
+    proposal_id: int,
+    payload: RejectConceptProposalRequest | None = None,
+    db: Session = Depends(get_db),
+):
+    payload = payload or RejectConceptProposalRequest()
+    try:
+        row = reject_concept_proposal(
+            db,
+            proposal_id,
+            reviewed_by=payload.reviewed_by,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"status": "ok", "proposal": proposal_payload(row)}
 
 
 @router.get("/product-candidates")
@@ -736,6 +935,7 @@ def list_product_candidates(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
+    _admin_user=Depends(get_admin_user),
 ):
     platform_ready = case(
         (ProductCandidate.platform_alignment_score >= 7, 1),
@@ -789,6 +989,14 @@ def list_product_candidates(
                 "currency": row.currency,
                 "affiliate_url": row.affiliate_url,
                 "merchant_url": row.merchant_url,
+                "affiliate_link_status": row.affiliate_link_status,
+                "affiliate_sub_id": row.affiliate_sub_id,
+                "affiliate_link_error_code": row.affiliate_link_error_code,
+                "affiliate_link_error_message": row.affiliate_link_error_message,
+                "affiliate_link_last_attempted_at": row.affiliate_link_last_attempted_at,
+                "affiliate_link_generated_at": row.affiliate_link_generated_at,
+                "affiliate_link_verified_at": row.affiliate_link_verified_at,
+                "affiliate_link_verified_by": row.affiliate_link_verified_by,
                 "image_url": row.image_url,
                 "availability": row.availability,
                 "normalized_category": row.normalized_category,
@@ -820,6 +1028,12 @@ def list_product_candidates(
                     if row.promoted_product_id
                     else None,
                 ),
+                "workflow_status": resolve_candidate_workflow_status(
+                    row,
+                    product_active_by_id.get(row.promoted_product_id)
+                    if row.promoted_product_id
+                    else None,
+                ),
                 "review_notes": row.review_notes,
                 "rejection_reason": row.rejection_reason,
                 "promoted_product_id": row.promoted_product_id,
@@ -837,6 +1051,7 @@ def list_product_candidates(
 def publish_approved_candidates(
     payload: PublishApprovedCandidatesRequest,
     db: Session = Depends(get_db),
+    _admin_user=Depends(get_admin_user),
 ):
     return publish_approved_product_candidates(
         db,
@@ -851,6 +1066,7 @@ def publish_candidate(
     candidate_id: int,
     payload: PublishCandidateRequest | None = None,
     db: Session = Depends(get_db),
+    _admin_user=Depends(get_admin_user),
 ):
     row = db.query(ProductCandidate).filter(ProductCandidate.id == candidate_id).first()
     if not row:
@@ -880,6 +1096,7 @@ def archive_product_candidate(
     candidate_id: int,
     payload: ArchiveCandidateRequest | None = None,
     db: Session = Depends(get_db),
+    _admin_user=Depends(get_admin_user),
 ):
     row = db.query(ProductCandidate).filter(ProductCandidate.id == candidate_id).first()
     if not row:
@@ -904,6 +1121,7 @@ def restore_product_candidate(
     candidate_id: int,
     payload: RestoreCandidateRequest | None = None,
     db: Session = Depends(get_db),
+    _admin_user=Depends(get_admin_user),
 ):
     row = db.query(ProductCandidate).filter(ProductCandidate.id == candidate_id).first()
     if not row:
@@ -928,6 +1146,7 @@ def approve_product_candidate(
     candidate_id: int,
     payload: ReviewCandidateRequest | None = None,
     db: Session = Depends(get_db),
+    _admin_user=Depends(get_admin_user),
 ):
     row = db.query(ProductCandidate).filter(ProductCandidate.id == candidate_id).first()
     if not row:
@@ -935,12 +1154,64 @@ def approve_product_candidate(
 
     payload = payload or ReviewCandidateRequest()
     try:
-        return approve_candidate(
+        approval = approve_candidate(
             db,
             row,
             reviewed_by=payload.reviewed_by,
         )
+        db.refresh(row)
+        affiliate = resolve_takeads_affiliate_link(db, row)
+        return {**approval, "affiliate": affiliate}
     except CandidateTransitionError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/product-candidates/{candidate_id}/affiliate-link/resolve")
+def resolve_product_candidate_affiliate_link(
+    candidate_id: int,
+    db: Session = Depends(get_db),
+    _admin_user=Depends(get_admin_user),
+):
+    row = db.query(ProductCandidate).filter(ProductCandidate.id == candidate_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+
+    try:
+        return {
+            "status": "ok",
+            "candidate_id": row.id,
+            "affiliate": resolve_takeads_affiliate_link(db, row),
+        }
+    except AffiliateLinkTransitionError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/product-candidates/{candidate_id}/affiliate-link/verify")
+def verify_product_candidate_affiliate_link(
+    candidate_id: int,
+    payload: VerifyAffiliateLinkRequest,
+    db: Session = Depends(get_db),
+    _admin_user=Depends(get_admin_user),
+):
+    row = db.query(ProductCandidate).filter(ProductCandidate.id == candidate_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+
+    try:
+        affiliate = verify_candidate_affiliate_link(
+            db,
+            row,
+            verified=payload.verified,
+            verified_by=payload.verified_by,
+        )
+        return {
+            "status": "ok",
+            "candidate_id": row.id,
+            "affiliate": affiliate,
+        }
+    except AffiliateLinkTransitionError as exc:
         db.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -950,6 +1221,7 @@ def reject_product_candidate(
     candidate_id: int,
     payload: ReviewCandidateRequest,
     db: Session = Depends(get_db),
+    _admin_user=Depends(get_admin_user),
 ):
     row = db.query(ProductCandidate).filter(ProductCandidate.id == candidate_id).first()
     if not row:

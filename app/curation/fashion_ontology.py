@@ -87,6 +87,20 @@ def _concept_phrase_index() -> tuple[tuple[str, dict[str, Any]], ...]:
     return tuple(phrases)
 
 
+def _runtime_concept_phrase_index(
+    concepts: tuple[dict[str, Any], ...],
+) -> tuple[tuple[str, dict[str, Any]], ...]:
+    phrases: list[tuple[str, dict[str, Any]]] = []
+    for concept in concepts:
+        candidates = [concept.get("label"), *(concept.get("aliases") or [])]
+        for candidate in candidates:
+            normalized = normalize_fashion_text(str(candidate or "")).strip()
+            if normalized:
+                phrases.append((normalized, concept))
+    phrases.sort(key=lambda item: (-len(item[0].split()), -len(item[0]), item[0]))
+    return tuple(phrases)
+
+
 @lru_cache(maxsize=1)
 def _brand_phrase_index() -> tuple[tuple[str, dict[str, Any]], ...]:
     phrases: list[tuple[str, dict[str, Any]]] = []
@@ -108,10 +122,15 @@ def recognize_fashion_evidence(
     text: str,
     *,
     brand_name: str | None = None,
+    concept_overrides: tuple[dict[str, Any], ...] = (),
 ) -> FashionEvidence:
     normalized_text = normalize_fashion_text(text)
     found: dict[str, RecognizedConcept] = {}
-    for phrase, concept in _concept_phrase_index():
+    phrase_index = (
+        *_runtime_concept_phrase_index(concept_overrides),
+        *_concept_phrase_index(),
+    )
+    for phrase, concept in phrase_index:
         concept_id = str(concept["id"])
         if concept_id in found or not _contains(normalized_text, phrase):
             continue
@@ -166,6 +185,22 @@ def ontology_counts() -> dict[str, int]:
         str(key): int(value)
         for key, value in load_fashion_ontology()["counts"].items()
     }
+
+
+def concept_definitions() -> tuple[dict[str, Any], ...]:
+    return tuple(load_fashion_ontology()["concepts"])
+
+
+def concept_definition_by_id(concept_id: str) -> dict[str, Any] | None:
+    normalized = str(concept_id or "").strip().lower()
+    return next(
+        (
+            concept
+            for concept in concept_definitions()
+            if str(concept.get("id") or "").lower() == normalized
+        ),
+        None,
+    )
 
 
 def destination_profiles() -> dict[str, dict[str, Any]]:

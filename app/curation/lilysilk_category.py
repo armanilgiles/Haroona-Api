@@ -489,6 +489,7 @@ def _build_candidate_draft(
         merchant_name=options.merchant_name,
         merchant_profile_allowed=options.merchant_profile_allowed,
         brand_name=brand_name,
+        concept_overrides=options.concept_overrides,
     )
     price_amount, currency = _price_from_product(product)
     schema_availability = str(product.get("schema_availability") or "").lower()

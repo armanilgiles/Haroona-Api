@@ -13,6 +13,7 @@ from app.curation.candidate_queue import (
 )
 from app.curation.product_candidate_publisher import (
     publish_approved_product_candidates,
+    publish_product_candidate,
 )
 from app.database import Base
 from app.models import Brand, City, Country, Product, ProductCandidate
@@ -76,7 +77,10 @@ class CandidateQueueTests(unittest.TestCase):
             title=f"Product {external_id}",
             price_amount=79,
             currency="USD",
+            affiliate_url=f"https://tracking.example.com/{external_id}",
             merchant_url=f"https://shop.example.com/products/{external_id}",
+            affiliate_link_status="verified",
+            affiliate_sub_id=f"haroona-product-test-{external_id}",
             image_url=f"https://cdn.example.com/{external_id}.jpg",
             availability="in_stock",
             normalized_category="dress",
@@ -153,6 +157,53 @@ class CandidateQueueTests(unittest.TestCase):
         self.assertEqual(result["published"], 1)
         self.assertEqual(result["updated"], 1)
         self.assertTrue(product.is_active)
+
+    def test_unverified_candidate_cannot_be_published(self):
+        candidate = self._candidate("not-verified", review_status="approved")
+        candidate.affiliate_link_status = "generated"
+        self.db.commit()
+
+        with self.assertRaises(ValueError) as raised:
+            publish_product_candidate(self.db, candidate)
+
+        self.assertIn("manually verified", str(raised.exception))
+        self.assertIsNone(candidate.promoted_product_id)
+
+    def test_publish_keeps_original_and_tracking_urls_separate(self):
+        candidate = self._candidate("separate-links", review_status="approved")
+
+        result = publish_product_candidate(self.db, candidate)
+
+        product = self.db.query(Product).filter(Product.id == result["product_id"]).one()
+        self.assertEqual(
+            product.merchant_url,
+            "https://shop.example.com/products/separate-links",
+        )
+        self.assertEqual(
+            product.affiliate_url,
+            "https://tracking.example.com/separate-links",
+        )
+        self.assertTrue(product.is_affiliate)
+
+    def test_restore_live_requires_verified_affiliate_link(self):
+        candidate = self._candidate(
+            "restore-unverified",
+            review_status="archived",
+            product_is_active=False,
+        )
+        candidate.affiliate_link_status = "failed"
+        candidate.affiliate_url = None
+        self.db.commit()
+
+        with self.assertRaises(CandidateTransitionError) as raised:
+            restore_candidate(
+                self.db,
+                candidate,
+                restored_by="test-curator",
+                restore_to="live",
+            )
+
+        self.assertIn("manually verified", str(raised.exception))
 
     def test_restore_to_pending_deactivates_a_stale_live_product(self):
         candidate = self._candidate(

@@ -337,6 +337,16 @@ class ProductCandidate(Base):
 
     affiliate_url = Column(Text, nullable=True)
     merchant_url = Column(Text, nullable=True)
+    affiliate_link_status = Column(
+        String(30), nullable=False, default="not_requested", index=True
+    )
+    affiliate_sub_id = Column(String(120), nullable=True, unique=True)
+    affiliate_link_error_code = Column(String(80), nullable=True)
+    affiliate_link_error_message = Column(Text, nullable=True)
+    affiliate_link_last_attempted_at = Column(DateTime(timezone=True), nullable=True)
+    affiliate_link_generated_at = Column(DateTime(timezone=True), nullable=True)
+    affiliate_link_verified_at = Column(DateTime(timezone=True), nullable=True)
+    affiliate_link_verified_by = Column(String(255), nullable=True)
     image_url = Column(Text, nullable=True)
     availability = Column(String(50), nullable=True, index=True)
     normalized_category = Column(String(80), nullable=True, index=True)
@@ -427,6 +437,55 @@ class CurationScanRun(Base):
 
     def __repr__(self):
         return f"<CurationScanRun {self.id} status={self.status}>"
+
+
+class FashionConcept(Base):
+    __tablename__ = "fashion_concepts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    concept_id = Column(String(120), nullable=False, unique=True, index=True)
+    label = Column(String(255), nullable=False)
+    category = Column(String(80), nullable=False, index=True)
+    traits = Column(JSON, nullable=False, default=list)
+    active = Column(Boolean, nullable=False, default=True, index=True)
+    created_by = Column(String(255), nullable=False, default="curator-studio")
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+class FashionConceptAlias(Base):
+    __tablename__ = "fashion_concept_aliases"
+
+    id = Column(Integer, primary_key=True, index=True)
+    normalized_phrase = Column(String(255), nullable=False, unique=True, index=True)
+    display_phrase = Column(String(255), nullable=False)
+    concept_id = Column(String(120), nullable=False, index=True)
+    source = Column(String(40), nullable=False, default="proposal_review")
+    active = Column(Boolean, nullable=False, default=True, index=True)
+    created_by = Column(String(255), nullable=False, default="curator-studio")
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class FashionConceptProposal(Base):
+    __tablename__ = "fashion_concept_proposals"
+
+    id = Column(Integer, primary_key=True, index=True)
+    normalized_phrase = Column(String(255), nullable=False, unique=True, index=True)
+    display_phrase = Column(String(255), nullable=False)
+    status = Column(String(20), nullable=False, default="pending", index=True)
+    occurrence_count = Column(Integer, nullable=False, default=0)
+    examples = Column(JSON, nullable=False, default=list)
+    candidate_keys = Column(JSON, nullable=False, default=list)
+    resolved_concept_id = Column(String(120), nullable=True, index=True)
+    reviewed_by = Column(String(255), nullable=True)
+    reviewed_at = Column(DateTime(timezone=True), nullable=True)
+    first_seen_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    last_seen_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
 class CurationScanRunCandidate(Base):

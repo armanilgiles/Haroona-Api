@@ -5,6 +5,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.curation.affiliate_links import AFFILIATE_VERIFIED
 from app.curation.candidate_queue import candidate_has_active_product
 from app.curation.eligibility import INELIGIBLE, evaluate_candidate_eligibility
 from app.curation.platform_alignment import (
@@ -12,7 +13,6 @@ from app.curation.platform_alignment import (
     platform_alignment_passes,
 )
 from app.models import Brand, City, Product, ProductCandidate
-from app.utils.affiliate import is_affiliate
 
 
 CATEGORY_ALIASES = {
@@ -125,6 +125,14 @@ def _require_publishable(candidate: ProductCandidate, city: City | None) -> None
     if candidate.review_status != "approved":
         raise ValueError("Only approved candidates can be published")
 
+    if (
+        candidate.affiliate_link_status != AFFILIATE_VERIFIED
+        or not _clean(candidate.affiliate_url)
+    ):
+        raise ValueError(
+            "Affiliate link must be generated, tested, and manually verified before publishing"
+        )
+
     if not city:
         raise ValueError(f"City '{candidate.target_city_slug}' does not exist yet")
 
@@ -174,12 +182,7 @@ def _product_url(candidate: ProductCandidate) -> tuple[str | None, str | None, b
     affiliate_url = _clean(candidate.affiliate_url)
     merchant_url = _clean(candidate.merchant_url)
 
-    # Keep Product.affiliate_url populated because older product endpoints expect it,
-    # but mark it as non-affiliate when the only available URL is the merchant URL.
-    primary_url = affiliate_url or merchant_url
-    is_aff = bool(affiliate_url and is_affiliate(affiliate_url))
-
-    return primary_url, merchant_url, is_aff
+    return affiliate_url, merchant_url, bool(affiliate_url)
 
 
 def publish_product_candidate(
@@ -289,6 +292,7 @@ def publish_approved_product_candidates(
     query = (
         db.query(ProductCandidate)
         .filter(ProductCandidate.review_status == "approved")
+        .filter(ProductCandidate.affiliate_link_status == AFFILIATE_VERIFIED)
         .filter(ProductCandidate.platform_alignment_score >= PLATFORM_ALIGNMENT_THRESHOLD)
         .filter(~candidate_has_active_product())
         .order_by(ProductCandidate.city_fit_score.desc(), ProductCandidate.id.desc())

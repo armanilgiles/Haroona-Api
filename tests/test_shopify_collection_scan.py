@@ -1,9 +1,13 @@
 import unittest
 from unittest.mock import Mock, patch
 
+import requests
+
 from app.curation.shopify_collection import (
+    CollectionRateLimitedError,
     CollectionScanOptions,
     ShopifyFetchResult,
+    _HOST_RATE_LIMIT_UNTIL,
     _fetch_shopify_collection_result,
     build_candidate_payload_result,
 )
@@ -51,12 +55,16 @@ def _low_platform_high_city_product(product_id: int) -> dict:
 
 class ShopifyCollectionScanTests(unittest.TestCase):
     def setUp(self):
+        _HOST_RATE_LIMIT_UNTIL.clear()
         self.options = CollectionScanOptions(
             source_url="https://shop.example.com/collections/new",
             merchant_name="Example",
             limit=2,
             image_mode="smart",
         )
+
+    def tearDown(self):
+        _HOST_RATE_LIMIT_UNTIL.clear()
 
     @patch("app.curation.shopify_collection.requests.get")
     def test_fetches_a_second_source_page_when_the_first_page_is_full(self, mock_get):
@@ -78,6 +86,59 @@ class ShopifyCollectionScanTests(unittest.TestCase):
         self.assertEqual(result.discovery_method, "shopify_collection_json")
         self.assertFalse(result.fallback_used)
         self.assertIn("page=2", mock_get.call_args_list[1].args[0])
+
+    @patch("app.curation.shopify_collection.time.sleep")
+    @patch("app.curation.shopify_collection.requests.get")
+    def test_retries_a_transient_shopify_timeout(self, mock_get, mock_sleep):
+        success_response = Mock(status_code=200)
+        success_response.json.return_value = {"products": [_shopify_product(1)]}
+        mock_get.side_effect = [requests.Timeout("slow response"), success_response]
+
+        result = _fetch_shopify_collection_result(self.options)
+
+        self.assertEqual(len(result.products), 1)
+        self.assertEqual(mock_get.call_count, 2)
+        self.assertEqual(mock_sleep.call_count, 1)
+        self.assertEqual(result.discovery_attempts[0]["status"], "retried")
+        self.assertEqual(result.discovery_attempts[-1]["status"], "succeeded")
+
+    @patch("app.curation.shopify_collection.requests.get")
+    def test_uses_a_smaller_json_page_when_the_large_page_fails(self, mock_get):
+        unavailable_response = Mock(status_code=404)
+        success_response = Mock(status_code=200)
+        success_response.json.return_value = {"products": [_shopify_product(1)]}
+        mock_get.side_effect = [unavailable_response, success_response]
+
+        result = _fetch_shopify_collection_result(self.options)
+
+        self.assertEqual(len(result.products), 1)
+        self.assertIn("limit=250", mock_get.call_args_list[0].args[0])
+        self.assertIn("limit=100", mock_get.call_args_list[1].args[0])
+        self.assertIn("page size of 100", result.discovery_attempts[-1]["detail"])
+
+    @patch("app.curation.shopify_collection.discover_storefront_products")
+    @patch("app.curation.shopify_collection.requests.get")
+    def test_rate_limit_stops_requests_and_starts_host_cooldown(
+        self,
+        mock_get,
+        mock_discover,
+    ):
+        mock_get.return_value = Mock(
+            status_code=429,
+            headers={"Retry-After": "120"},
+        )
+
+        with self.assertRaises(CollectionRateLimitedError) as context:
+            _fetch_shopify_collection_result(self.options)
+
+        self.assertEqual(mock_get.call_count, 1)
+        mock_discover.assert_not_called()
+        self.assertEqual(context.exception.retry_after_seconds, 120)
+        self.assertEqual(context.exception.attempts[-1]["status"], "rate_limited")
+
+        with self.assertRaises(CollectionRateLimitedError):
+            _fetch_shopify_collection_result(self.options)
+        self.assertEqual(mock_get.call_count, 1)
 
     @patch("app.curation.shopify_collection.discover_storefront_products")
     @patch("app.curation.shopify_collection.requests.get")
@@ -113,6 +174,39 @@ class ShopifyCollectionScanTests(unittest.TestCase):
         self.assertEqual(result.pages_scanned, 2)
         self.assertIn("used public product pages", result.warnings[0])
         self.assertEqual(result.discovery_attempts[-1]["status"], "succeeded")
+
+    @patch("app.curation.shopify_collection.discover_storefront_products")
+    @patch("app.curation.shopify_collection.requests.get")
+    def test_storefront_fallback_preserves_category_query_parameters(
+        self,
+        mock_get,
+        mock_discover,
+    ):
+        mock_get.return_value = Mock(status_code=404)
+        mock_discover.return_value = StorefrontDiscoveryResult(
+            products=[_shopify_product(1)],
+            discovery_method="embedded_storefront_data",
+            pages_scanned=1,
+            source_truncated=False,
+            attempts=(),
+        )
+        source_url = (
+            "https://global.example.com/us/category/100?"
+            "category1DepthCode=100&gender=F#products"
+        )
+        options = CollectionScanOptions(
+            source_url=source_url,
+            merchant_name="Example",
+            limit=2,
+        )
+
+        _fetch_shopify_collection_result(options)
+
+        self.assertEqual(
+            mock_discover.call_args.args[0],
+            "https://global.example.com/us/category/100?"
+            "category1DepthCode=100&gender=F",
+        )
 
     @patch("app.curation.shopify_collection.select_shopify_product_image")
     @patch("app.curation.shopify_collection._fetch_shopify_collection_result")
@@ -205,6 +299,7 @@ class ShopifyCollectionScanTests(unittest.TestCase):
             limit=1,
             image_mode="smart",
         )
+
         mock_fetch.return_value = ShopifyFetchResult(
             products=[
                 _low_platform_high_city_product(1),

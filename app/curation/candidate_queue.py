@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from sqlalchemy import exists
 from sqlalchemy.orm import Query, Session
 
+from app.curation.affiliate_links import AFFILIATE_VERIFIED
 from app.curation.eligibility import INELIGIBLE, evaluate_candidate_eligibility
 from app.curation.platform_alignment import (
     PLATFORM_ALIGNMENT_THRESHOLD,
@@ -240,6 +241,13 @@ def restore_candidate(
     product_was_reactivated = False
 
     if normalized_target == "live":
+        if (
+            candidate.affiliate_link_status != AFFILIATE_VERIFIED
+            or not (candidate.affiliate_url or "").strip()
+        ):
+            raise CandidateTransitionError(
+                "Affiliate link must be manually verified before restoring this product live"
+            )
         eligibility = _refresh_candidate_eligibility(candidate)
         if eligibility.status == INELIGIBLE:
             reasons = ", ".join(eligibility.blocking_reasons)
