@@ -21,16 +21,17 @@ except ImportError:  # pragma: no cover - optional image-quality scoring depende
 
 from app.curation.eligibility import add_reason_counts, evaluate_candidate_eligibility
 from app.curation.platform_alignment import score_platform_alignment
-from app.curation.scoring import HYBRID_SCORING_VERSION, score_city_fit
 from app.curation.shopify_collection import (
     USER_AGENT,
     CandidatePayload,
     CollectionScanOptions,
+    _candidate_item_payload,
     build_scan_summary,
     candidate_review_rank,
     _normalize_category,
     _parse_decimal,
     _strip_html,
+    score_candidate_for_scan,
     upsert_product_candidates,
 )
 
@@ -1123,17 +1124,14 @@ def build_shopcider_candidate_payload_result(options: CollectionScanOptions) -> 
             add_reason_counts(ineligible_reason_counts, eligibility.blocking_reasons)
             continue
 
-        score = score_city_fit(
+        score, assignment = score_candidate_for_scan(
+            options=options,
             title=title,
             description=description,
             product_type=product_type,
             tags=tags,
-            target_city_slug=options.target_city_slug,
             normalized_category=normalized_category,
-            merchant_name=options.merchant_name,
-            merchant_profile_allowed=options.merchant_profile_allowed,
             brand_name=product.get("brand_name") or options.merchant_name,
-            concept_overrides=options.concept_overrides,
         )
 
         image_candidates = _image_candidates_for_product(
@@ -1209,7 +1207,7 @@ def build_shopcider_candidate_payload_result(options: CollectionScanOptions) -> 
                 image_url=image_url,
                 availability=availability,
                 normalized_category=normalized_category,
-                target_city_slug=options.target_city_slug,
+                target_city_slug=assignment.final_city_slug,
                 city_connection_type=score.city_connection_type,
                 city_connection_note=score.city_connection_note,
                 merchant_verification=options.merchant_verification,
@@ -1218,13 +1216,21 @@ def build_shopcider_candidate_payload_result(options: CollectionScanOptions) -> 
                 eligibility_reasons=final_eligibility.reasons,
                 platform_alignment_score=platform_alignment.score,
                 platform_alignment_reasons=platform_alignment.reasons,
-                city_fit_score=score.score,
-                city_fit_scores=score.city_fit_scores or {options.target_city_slug: score.score},
+                city_fit_score=(
+                    score.city_fit_percentage
+                    if score.city_fit_percentage is not None
+                    else score.score
+                ),
+                city_fit_scores=score.city_fit_scores or {
+                    assignment.recommended_city_slug: score.score
+                },
                 secondary_city_slug=score.secondary_city_slug,
                 scoring_confidence=score.confidence,
                 scoring_method="deterministic_rules",
-                scoring_version=HYBRID_SCORING_VERSION,
-                haroona_score=score.score,
+                scoring_version=score.scoring_version,
+                haroona_score=(
+                    score.raw_total if score.raw_total is not None else score.score
+                ),
                 score_reasons=score.reasons,
                 review_notes=(
                     "; ".join(
@@ -1233,6 +1239,18 @@ def build_shopcider_candidate_payload_result(options: CollectionScanOptions) -> 
                     )
                     or None
                 ),
+                scoring_mode=score.scoring_mode,
+                scoring_analysis=score.analysis_payload(),
+                city_scan_mode=assignment.city_scan_mode,
+                recommended_city_slug=assignment.recommended_city_slug,
+                recommended_city_score=assignment.recommended_city_score,
+                runner_up_city_slug=assignment.runner_up_city_slug,
+                runner_up_city_score=assignment.runner_up_city_score,
+                city_score_margin=assignment.city_score_margin,
+                city_assignment_status=assignment.city_assignment_status,
+                city_assignment_source=assignment.city_assignment_source,
+                city_candidates=assignment.city_candidates,
+                manual_city_override=assignment.manual_city_override,
             )
         )
 
@@ -1277,43 +1295,15 @@ def scan_and_save_shopcider_category(db: Session, options: CollectionScanOptions
         "source_url": _clean_source_url(options.source_url),
         "scan_run_id": options.scan_run_id,
         "merchant_name": options.merchant_name,
+        "city_mode": options.city_mode,
         "target_city_slug": options.target_city_slug,
+        "scoring_mode": options.scoring_mode,
+        "scoring_version": (
+            payloads[0].scoring_version if payloads else None
+        ),
         "image_mode": _normalize_image_mode(options.image_mode),
         "found": len(payloads),
         **counts,
         "summary": summary,
-        "items": [
-            {
-                "external_product_id": item.external_product_id,
-                "title": item.title,
-                "price_amount": str(item.price_amount) if item.price_amount is not None else None,
-                "currency": item.currency,
-                "merchant_url": item.merchant_url,
-                "image_url": item.image_url,
-                "availability": item.availability,
-                "normalized_category": item.normalized_category,
-                "city_connection_type": item.city_connection_type,
-                "city_connection_note": item.city_connection_note,
-                "merchant_verification": item.merchant_verification,
-                "merchant_profile_key": item.merchant_profile_key,
-                "eligibility_status": item.eligibility_status,
-                "eligibility_reasons": item.eligibility_reasons,
-                "platform_alignment_score": (
-                    str(item.platform_alignment_score)
-                    if item.platform_alignment_score is not None
-                    else None
-                ),
-                "platform_alignment_reasons": item.platform_alignment_reasons,
-                "city_fit_score": item.city_fit_score,
-                "city_fit_scores": item.city_fit_scores,
-                "secondary_city_slug": item.secondary_city_slug,
-                "scoring_confidence": item.scoring_confidence,
-                "scoring_method": item.scoring_method,
-                "scoring_version": item.scoring_version,
-                "haroona_score": item.haroona_score,
-                "score_reasons": item.score_reasons,
-                "review_notes": item.review_notes,
-            }
-            for item in payloads
-        ],
+        "items": [_candidate_item_payload(item) for item in payloads],
     }

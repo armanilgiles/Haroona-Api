@@ -245,9 +245,12 @@ def score_platform_alignment(
         f"Curation utility {component_scores['curation_utility']}/10 — {utility_reason}",
     ]
     reasons.append(
-        "Platform threshold passed"
+        "Platform advisory: strong alignment signal"
         if weighted_score >= PLATFORM_ALIGNMENT_THRESHOLD
-        else f"Below Haroona's {PLATFORM_ALIGNMENT_THRESHOLD}/10 platform threshold"
+        else (
+            "Platform advisory: alignment is below "
+            f"{PLATFORM_ALIGNMENT_THRESHOLD}/10; curator review recommended"
+        )
     )
 
     return PlatformAlignmentResult(

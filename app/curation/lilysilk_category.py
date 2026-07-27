@@ -17,14 +17,15 @@ from app.curation.eligibility import (
     evaluate_candidate_eligibility,
 )
 from app.curation.platform_alignment import score_platform_alignment
-from app.curation.scoring import HYBRID_SCORING_VERSION, score_city_fit
 from app.curation.shopify_collection import (
     USER_AGENT,
     CandidatePayload,
     CollectionScanOptions,
+    _candidate_item_payload,
     _normalize_category,
     build_scan_summary,
     candidate_review_rank,
+    score_candidate_for_scan,
     upsert_product_candidates,
 )
 from app.curation.shopify_image_selection import (
@@ -479,17 +480,14 @@ def _build_candidate_draft(
     )
     description = str(product.get("description") or "").strip() or None
     brand_name = str(product.get("brand_name") or "").strip() or options.merchant_name
-    score = score_city_fit(
+    score, assignment = score_candidate_for_scan(
+        options=options,
         title=title,
         description=description,
         product_type=product_type,
         tags=tags,
-        target_city_slug=options.target_city_slug,
         normalized_category=normalized_category,
-        merchant_name=options.merchant_name,
-        merchant_profile_allowed=options.merchant_profile_allowed,
         brand_name=brand_name,
-        concept_overrides=options.concept_overrides,
     )
     price_amount, currency = _price_from_product(product)
     schema_availability = str(product.get("schema_availability") or "").lower()
@@ -545,7 +543,7 @@ def _build_candidate_draft(
             image_url=None,
             availability=availability,
             normalized_category=normalized_category,
-            target_city_slug=options.target_city_slug,
+            target_city_slug=assignment.final_city_slug,
             city_connection_type=score.city_connection_type,
             city_connection_note=score.city_connection_note,
             merchant_verification=options.merchant_verification,
@@ -554,18 +552,36 @@ def _build_candidate_draft(
             eligibility_reasons=eligibility.reasons,
             platform_alignment_score=preliminary_platform_alignment.score,
             platform_alignment_reasons=preliminary_platform_alignment.reasons,
-            city_fit_score=score.score,
-            city_fit_scores=score.city_fit_scores or {options.target_city_slug: score.score},
+            city_fit_score=(
+                score.city_fit_percentage
+                if score.city_fit_percentage is not None
+                else score.score
+            ),
+            city_fit_scores=score.city_fit_scores or {
+                assignment.recommended_city_slug: score.score
+            },
             secondary_city_slug=score.secondary_city_slug,
             scoring_confidence=score.confidence,
             scoring_method="deterministic_rules",
-            scoring_version=HYBRID_SCORING_VERSION,
-            haroona_score=score.score,
+            scoring_version=score.scoring_version,
+            haroona_score=score.raw_total if score.raw_total is not None else score.score,
             score_reasons=score.reasons,
             review_notes=(
                 "; ".join(reason.replace("_", " ") for reason in eligibility.warning_reasons)
                 or None
             ),
+            scoring_mode=score.scoring_mode,
+            scoring_analysis=score.analysis_payload(),
+            city_scan_mode=assignment.city_scan_mode,
+            recommended_city_slug=assignment.recommended_city_slug,
+            recommended_city_score=assignment.recommended_city_score,
+            runner_up_city_slug=assignment.runner_up_city_slug,
+            runner_up_city_score=assignment.runner_up_city_score,
+            city_score_margin=assignment.city_score_margin,
+            city_assignment_status=assignment.city_assignment_status,
+            city_assignment_source=assignment.city_assignment_source,
+            city_candidates=assignment.city_candidates,
+            manual_city_override=assignment.manual_city_override,
         ),
         image_candidates=image_candidates,
         product_type=product_type,
@@ -710,46 +726,16 @@ def scan_and_save_lilysilk_category(
         "source_url": _clean_source_url(options.source_url),
         "scan_run_id": options.scan_run_id,
         "merchant_name": options.merchant_name,
+        "city_mode": options.city_mode,
         "target_city_slug": options.target_city_slug,
+        "scoring_mode": options.scoring_mode,
+        "scoring_version": (
+            payloads[0].scoring_version if payloads else None
+        ),
         "image_mode": image_mode,
         "found": len(payloads),
         **counts,
         "summary": summary,
         "warnings": list(build_result.warnings),
-        "items": [
-            {
-                "external_product_id": item.external_product_id,
-                "title": item.title,
-                "price_amount": (
-                    str(item.price_amount) if item.price_amount is not None else None
-                ),
-                "currency": item.currency,
-                "merchant_url": item.merchant_url,
-                "image_url": item.image_url,
-                "availability": item.availability,
-                "normalized_category": item.normalized_category,
-                "city_connection_type": item.city_connection_type,
-                "city_connection_note": item.city_connection_note,
-                "merchant_verification": item.merchant_verification,
-                "merchant_profile_key": item.merchant_profile_key,
-                "eligibility_status": item.eligibility_status,
-                "eligibility_reasons": item.eligibility_reasons,
-                "platform_alignment_score": (
-                    str(item.platform_alignment_score)
-                    if item.platform_alignment_score is not None
-                    else None
-                ),
-                "platform_alignment_reasons": item.platform_alignment_reasons,
-                "city_fit_score": item.city_fit_score,
-                "city_fit_scores": item.city_fit_scores,
-                "secondary_city_slug": item.secondary_city_slug,
-                "scoring_confidence": item.scoring_confidence,
-                "scoring_method": item.scoring_method,
-                "scoring_version": item.scoring_version,
-                "haroona_score": item.haroona_score,
-                "score_reasons": item.score_reasons,
-                "review_notes": item.review_notes,
-            }
-            for item in payloads
-        ],
+        "items": [_candidate_item_payload(item) for item in payloads],
     }

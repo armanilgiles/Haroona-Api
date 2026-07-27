@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from email.utils import parsedate_to_datetime
@@ -13,6 +13,13 @@ from urllib.parse import urljoin, urlparse, urlunparse
 import requests
 from sqlalchemy.orm import Session
 
+from app.curation.city_assignment import (
+    CityAssignmentDecision,
+    CityScanMode,
+    build_city_assignment_decision,
+    city_candidate_for_slug,
+    normalize_city_scan_mode,
+)
 from app.curation.eligibility import (
     add_reason_counts,
     blocking_reasons_only,
@@ -22,7 +29,12 @@ from app.curation.platform_alignment import (
     platform_alignment_passes,
     score_platform_alignment,
 )
-from app.curation.scoring import HYBRID_SCORING_VERSION, score_city_fit
+from app.curation.scoring import (
+    LEGACY_SCORING_MODE,
+    STRICT_DISTINCTIVENESS_SCORING_MODE,
+    ScoreResult,
+    score_city_fit,
+)
 from app.curation.shopify_image_selection import (
     ShopifyImageCandidate,
     ShopifyImageSelectionCache,
@@ -55,7 +67,9 @@ _HOST_RATE_LIMIT_UNTIL: dict[str, float] = {}
 class CollectionScanOptions:
     source_url: str
     merchant_name: str
-    target_city_slug: str = "london"
+    target_city_slug: str | None = "london"
+    city_mode: str = CityScanMode.SELECTED.value
+    active_city_slugs: tuple[str, ...] = ()
     normalized_category: str | None = None
     source: str = "shopify"
     source_type: str = "collection"
@@ -66,6 +80,7 @@ class CollectionScanOptions:
     merchant_verification: str = "unverified"
     merchant_profile_allowed: bool = False
     concept_overrides: tuple[dict[str, Any], ...] = ()
+    scoring_mode: str = LEGACY_SCORING_MODE
 
 
 @dataclass(frozen=True)
@@ -86,7 +101,7 @@ class CandidatePayload:
     image_url: str | None
     availability: str | None
     normalized_category: str | None
-    target_city_slug: str
+    target_city_slug: str | None
     city_connection_type: str | None
     city_connection_note: str | None
     merchant_verification: str
@@ -104,6 +119,19 @@ class CandidatePayload:
     haroona_score: int
     score_reasons: list[str]
     review_notes: str | None
+    scoring_mode: str = LEGACY_SCORING_MODE
+    scoring_analysis: dict[str, object] = field(default_factory=dict)
+    manual_observed_garment_details: list[str] = field(default_factory=list)
+    city_scan_mode: str = CityScanMode.SELECTED.value
+    recommended_city_slug: str | None = None
+    recommended_city_score: int | None = None
+    runner_up_city_slug: str | None = None
+    runner_up_city_score: int | None = None
+    city_score_margin: int | None = None
+    city_assignment_status: str = "manually_assigned"
+    city_assignment_source: str = "selected_scan"
+    city_candidates: list[dict[str, Any]] = field(default_factory=list)
+    manual_city_override: bool = False
 
 
 @dataclass(frozen=True)
@@ -159,6 +187,52 @@ class ShopifyBuildResult:
     discovery_method: str = "shopify_collection_json"
     fallback_used: bool = False
     discovery_attempts: tuple[dict[str, str], ...] = ()
+
+
+def score_candidate_for_scan(
+    *,
+    options: CollectionScanOptions,
+    title: str,
+    description: str | None,
+    product_type: str | None,
+    tags: list[str],
+    normalized_category: str | None,
+    brand_name: str | None,
+    manual_observed_garment_details: list[str] | tuple[str, ...] = (),
+) -> tuple[ScoreResult, CityAssignmentDecision]:
+    """Extract garment evidence once, score active cities, and assign if safe."""
+    mode = normalize_city_scan_mode(options.city_mode)
+    active_city_slugs = (
+        options.active_city_slugs if mode == CityScanMode.AUTO else ()
+    )
+    score = score_city_fit(
+        title=title,
+        description=description,
+        product_type=product_type,
+        tags=tags,
+        target_city_slug=(
+            None if mode == CityScanMode.AUTO else options.target_city_slug
+        ),
+        normalized_category=normalized_category,
+        merchant_name=options.merchant_name,
+        merchant_profile_allowed=options.merchant_profile_allowed,
+        brand_name=brand_name,
+        concept_overrides=options.concept_overrides,
+        scoring_mode=(
+            STRICT_DISTINCTIVENESS_SCORING_MODE
+            if mode == CityScanMode.AUTO
+            else options.scoring_mode
+        ),
+        manual_observed_garment_details=manual_observed_garment_details,
+        candidate_city_slugs=active_city_slugs or None,
+    )
+    assignment = build_city_assignment_decision(
+        score,
+        city_mode=mode,
+        selected_city_slug=options.target_city_slug,
+        active_city_slugs=active_city_slugs,
+    )
+    return score, assignment
 
 
 def _strip_html(value: str | None) -> str | None:
@@ -675,17 +749,14 @@ def _build_candidate_draft(
     )
     brand_name = product.get("vendor") or options.merchant_name
 
-    score = score_city_fit(
+    score, assignment = score_candidate_for_scan(
+        options=options,
         title=title,
         description=description,
         product_type=product_type,
         tags=tags,
-        target_city_slug=options.target_city_slug,
         normalized_category=normalized_category,
-        merchant_name=options.merchant_name,
-        merchant_profile_allowed=options.merchant_profile_allowed,
         brand_name=brand_name,
-        concept_overrides=options.concept_overrides,
     )
     eligibility = evaluate_candidate_eligibility(
         title=title,
@@ -732,7 +803,7 @@ def _build_candidate_draft(
             image_url=None,
             availability=availability,
             normalized_category=normalized_category,
-            target_city_slug=options.target_city_slug,
+            target_city_slug=assignment.final_city_slug,
             city_connection_type=score.city_connection_type,
             city_connection_note=score.city_connection_note,
             merchant_verification=options.merchant_verification,
@@ -741,18 +812,38 @@ def _build_candidate_draft(
             eligibility_reasons=eligibility.reasons,
             platform_alignment_score=preliminary_platform_alignment.score,
             platform_alignment_reasons=preliminary_platform_alignment.reasons,
-            city_fit_score=score.score,
-            city_fit_scores=score.city_fit_scores or {options.target_city_slug: score.score},
+            city_fit_score=(
+                score.city_fit_percentage
+                if score.city_fit_percentage is not None
+                else score.score
+            ),
+            city_fit_scores=score.city_fit_scores or {
+                assignment.recommended_city_slug: score.score
+            },
             secondary_city_slug=score.secondary_city_slug,
             scoring_confidence=score.confidence,
             scoring_method="deterministic_rules",
-            scoring_version=HYBRID_SCORING_VERSION,
-            haroona_score=score.score,
+            scoring_version=score.scoring_version,
+            haroona_score=(
+                score.raw_total if score.raw_total is not None else score.score
+            ),
             score_reasons=score.reasons,
             review_notes=(
                 "; ".join(reason.replace("_", " ") for reason in eligibility.warning_reasons)
                 or None
             ),
+            scoring_mode=score.scoring_mode,
+            scoring_analysis=score.analysis_payload(),
+            city_scan_mode=assignment.city_scan_mode,
+            recommended_city_slug=assignment.recommended_city_slug,
+            recommended_city_score=assignment.recommended_city_score,
+            runner_up_city_slug=assignment.runner_up_city_slug,
+            runner_up_city_score=assignment.runner_up_city_score,
+            city_score_margin=assignment.city_score_margin,
+            city_assignment_status=assignment.city_assignment_status,
+            city_assignment_source=assignment.city_assignment_source,
+            city_candidates=assignment.city_candidates,
+            manual_city_override=assignment.manual_city_override,
         ),
         image_candidates=image_candidates,
         product_type=product_type,
@@ -879,17 +970,17 @@ def _cached_candidate_payload(
     *,
     options: CollectionScanOptions,
 ) -> CandidatePayload:
-    score = score_city_fit(
+    score, assignment = score_candidate_for_scan(
+        options=options,
         title=record.title,
         description=record.description,
         product_type=record.normalized_category,
         tags=[],
-        target_city_slug=options.target_city_slug,
         normalized_category=record.normalized_category or options.normalized_category,
-        merchant_name=options.merchant_name,
-        merchant_profile_allowed=options.merchant_profile_allowed,
         brand_name=record.brand_name,
-        concept_overrides=options.concept_overrides,
+        manual_observed_garment_details=(
+            record.manual_observed_garment_details or []
+        ),
     )
     eligibility = evaluate_candidate_eligibility(
         title=record.title,
@@ -937,7 +1028,7 @@ def _cached_candidate_payload(
         image_url=record.image_url,
         availability=record.availability,
         normalized_category=record.normalized_category or options.normalized_category,
-        target_city_slug=options.target_city_slug,
+        target_city_slug=assignment.final_city_slug,
         city_connection_type=score.city_connection_type,
         city_connection_note=score.city_connection_note,
         merchant_verification=options.merchant_verification,
@@ -946,15 +1037,38 @@ def _cached_candidate_payload(
         eligibility_reasons=eligibility.reasons,
         platform_alignment_score=platform_score,
         platform_alignment_reasons=platform_reasons,
-        city_fit_score=score.score,
-        city_fit_scores=score.city_fit_scores or {options.target_city_slug: score.score},
+        city_fit_score=(
+            score.city_fit_percentage
+            if score.city_fit_percentage is not None
+            else score.score
+        ),
+        city_fit_scores=score.city_fit_scores or {
+            assignment.recommended_city_slug: score.score
+        },
         secondary_city_slug=score.secondary_city_slug,
         scoring_confidence=score.confidence,
         scoring_method="deterministic_rules",
-        scoring_version=HYBRID_SCORING_VERSION,
-        haroona_score=score.score,
+        scoring_version=score.scoring_version,
+        haroona_score=(
+            score.raw_total if score.raw_total is not None else score.score
+        ),
         score_reasons=score.reasons,
         review_notes=record.review_notes,
+        scoring_mode=score.scoring_mode,
+        scoring_analysis=score.analysis_payload(),
+        manual_observed_garment_details=list(
+            record.manual_observed_garment_details or []
+        ),
+        city_scan_mode=assignment.city_scan_mode,
+        recommended_city_slug=assignment.recommended_city_slug,
+        recommended_city_score=assignment.recommended_city_score,
+        runner_up_city_slug=assignment.runner_up_city_slug,
+        runner_up_city_score=assignment.runner_up_city_score,
+        city_score_margin=assignment.city_score_margin,
+        city_assignment_status=assignment.city_assignment_status,
+        city_assignment_source=assignment.city_assignment_source,
+        city_candidates=assignment.city_candidates,
+        manual_city_override=assignment.manual_city_override,
     )
 
 
@@ -1033,6 +1147,9 @@ def upsert_product_candidates(db: Session, payloads: list[CandidatePayload]) -> 
         previous_merchant_url = (
             (record.merchant_url or "").strip() if record is not None else None
         )
+        previous_final_city = (
+            (record.target_city_slug or "").strip() if record is not None else None
+        )
 
         if record:
             updated += 1
@@ -1072,23 +1189,116 @@ def upsert_product_candidates(db: Session, payloads: list[CandidatePayload]) -> 
         record.image_url = payload.image_url or record.image_url
         record.availability = payload.availability
         record.normalized_category = payload.normalized_category
-        record.target_city_slug = payload.target_city_slug
-        record.city_connection_type = payload.city_connection_type
-        record.city_connection_note = payload.city_connection_note
+        preserve_final_assignment = bool(
+            is_existing
+            and record.target_city_slug
+            and (
+                record.manual_city_override
+                or record.promoted_product_id is not None
+                or record.review_status in {"approved", "archived"}
+            )
+        )
+        record.city_scan_mode = payload.city_scan_mode
+        record.recommended_city_slug = payload.recommended_city_slug
+        record.recommended_city_score = payload.recommended_city_score
+        record.runner_up_city_slug = payload.runner_up_city_slug
+        record.runner_up_city_score = payload.runner_up_city_score
+        record.city_score_margin = payload.city_score_margin
+        record.city_candidates = payload.city_candidates
+        if not preserve_final_assignment:
+            record.target_city_slug = payload.target_city_slug
+            record.city_assignment_status = payload.city_assignment_status
+            record.city_assignment_source = payload.city_assignment_source
+            record.manual_city_override = payload.manual_city_override
+            if record.target_city_slug:
+                if (
+                    record.target_city_slug != previous_final_city
+                    or record.city_assigned_at is None
+                ):
+                    record.city_assigned_at = datetime.now(timezone.utc)
+                    record.city_assigned_by = (
+                        "automatic-city-scan"
+                        if payload.city_assignment_source == "automatic"
+                        else "selected-city-scan"
+                    )
+            else:
+                record.city_assigned_at = None
+                record.city_assigned_by = None
+
+        selected_city_result = (
+            city_candidate_for_slug(
+                payload.city_candidates,
+                record.target_city_slug,
+            )
+            if preserve_final_assignment
+            else None
+        )
+        preserve_existing_score = preserve_final_assignment and selected_city_result is None
+        record.city_connection_type = (
+            selected_city_result.get("city_connection_type")
+            if selected_city_result
+            else payload.city_connection_type
+        )
+        record.city_connection_note = (
+            selected_city_result.get("city_connection_note")
+            if selected_city_result
+            else payload.city_connection_note
+        )
         record.merchant_verification = payload.merchant_verification
-        record.merchant_profile_key = payload.merchant_profile_key
+        record.merchant_profile_key = (
+            selected_city_result.get("merchant_profile_key")
+            if selected_city_result
+            else payload.merchant_profile_key
+        )
         record.eligibility_status = payload.eligibility_status
         record.eligibility_reasons = payload.eligibility_reasons
         record.platform_alignment_score = payload.platform_alignment_score
         record.platform_alignment_reasons = payload.platform_alignment_reasons
-        record.city_fit_score = payload.city_fit_score
+        if not preserve_existing_score:
+            record.city_fit_score = (
+                int(selected_city_result["city_fit_score"])
+                if selected_city_result
+                else payload.city_fit_score
+            )
         record.city_fit_scores = payload.city_fit_scores
         record.secondary_city_slug = payload.secondary_city_slug
-        record.scoring_confidence = payload.scoring_confidence
+        if not preserve_existing_score:
+            record.scoring_confidence = (
+                int(selected_city_result["confidence"])
+                if selected_city_result
+                and selected_city_result.get("confidence") is not None
+                else payload.scoring_confidence
+            )
         record.scoring_method = payload.scoring_method
-        record.scoring_version = payload.scoring_version
-        record.haroona_score = payload.haroona_score
-        record.score_reasons = payload.score_reasons
+        selected_analysis = (
+            selected_city_result.get("scoring_analysis")
+            if selected_city_result
+            else None
+        )
+        if not preserve_existing_score:
+            record.scoring_version = str(
+                (selected_analysis or {}).get("scoring_version")
+                or payload.scoring_version
+            )
+            record.scoring_mode = str(
+                (selected_analysis or {}).get("scoring_mode")
+                or payload.scoring_mode
+            )
+            record.scoring_analysis = selected_analysis or payload.scoring_analysis
+        record.manual_observed_garment_details = (
+            payload.manual_observed_garment_details
+        )
+        if not preserve_existing_score:
+            record.haroona_score = (
+                int(selected_city_result["score"])
+                if selected_city_result
+                else payload.haroona_score
+            )
+            record.score_reasons = (
+                list(selected_city_result.get("score_reasons") or [])
+                if selected_city_result
+                else payload.score_reasons
+            )
         record.review_notes = payload.review_notes
 
         if not record.review_status:
@@ -1180,6 +1390,17 @@ def _candidate_item_payload(item: CandidatePayload) -> dict[str, Any]:
         "image_url": item.image_url,
         "availability": item.availability,
         "normalized_category": item.normalized_category,
+        "city_mode": item.city_scan_mode,
+        "target_city_slug": item.target_city_slug,
+        "recommended_city_slug": item.recommended_city_slug,
+        "recommended_city_score": item.recommended_city_score,
+        "runner_up_city_slug": item.runner_up_city_slug,
+        "runner_up_city_score": item.runner_up_city_score,
+        "city_score_margin": item.city_score_margin,
+        "city_assignment_status": item.city_assignment_status,
+        "city_assignment_source": item.city_assignment_source,
+        "city_candidates": item.city_candidates,
+        "manual_city_override": item.manual_city_override,
         "city_connection_type": item.city_connection_type,
         "city_connection_note": item.city_connection_note,
         "merchant_verification": item.merchant_verification,
@@ -1198,6 +1419,8 @@ def _candidate_item_payload(item: CandidatePayload) -> dict[str, Any]:
         "scoring_confidence": item.scoring_confidence,
         "scoring_method": item.scoring_method,
         "scoring_version": item.scoring_version,
+        "scoring_mode": item.scoring_mode,
+        "scoring_analysis": item.scoring_analysis,
         "haroona_score": item.haroona_score,
         "score_reasons": item.score_reasons,
         "review_notes": item.review_notes,
@@ -1254,7 +1477,7 @@ def _scan_saved_snapshot_after_rate_limit(
     warning = (
         "The storefront returned HTTP 429, so Haroona did not make additional "
         "storefront requests. It reused previously saved product data and recalculated "
-        f"the {options.target_city_slug.replace('-', ' ').title()} scores. Prices, "
+        f"{'all active city' if options.city_mode == CityScanMode.AUTO.value else (options.target_city_slug or 'selected city').replace('-', ' ').title()} scores. Prices, "
         "availability, and images are from the last successful source scan."
     )
     summary = build_scan_summary(
@@ -1285,7 +1508,10 @@ def _scan_saved_snapshot_after_rate_limit(
         "source_url": clean_source_url,
         "scan_run_id": options.scan_run_id,
         "merchant_name": options.merchant_name,
+        "city_mode": options.city_mode,
         "target_city_slug": options.target_city_slug,
+        "scoring_mode": options.scoring_mode,
+        "scoring_version": payloads[0].scoring_version,
         "image_mode": normalize_image_mode(options.image_mode),
         "found": len(payloads),
         **counts,
@@ -1331,7 +1557,12 @@ def scan_and_save_shopify_collection(db: Session, options: CollectionScanOptions
         "source_url": _clean_collection_source_url(options.source_url),
         "scan_run_id": options.scan_run_id,
         "merchant_name": options.merchant_name,
+        "city_mode": options.city_mode,
         "target_city_slug": options.target_city_slug,
+        "scoring_mode": options.scoring_mode,
+        "scoring_version": (
+            payloads[0].scoring_version if payloads else None
+        ),
         "image_mode": normalize_image_mode(options.image_mode),
         "found": len(payloads),
         **counts,

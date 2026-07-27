@@ -20,17 +20,21 @@ def start_scan_run(
     scan_run_id: str,
     source_url: str,
     merchant_name: str,
-    target_city_slug: str,
+    target_city_slug: str | None,
     normalized_category: str | None,
     requested_image_mode: str,
     requested_limit: int,
+    collection_id: str | None = None,
+    city_mode: str = "selected",
 ) -> CurationScanRun:
     run = CurationScanRun(
         id=scan_run_id,
         status="running",
         source_url=source_url,
         source_host=(urlparse(source_url).hostname or "").lower() or None,
+        collection_id=collection_id,
         merchant_name=merchant_name,
+        city_mode=city_mode,
         target_city_slug=target_city_slug,
         normalized_category=normalized_category,
         requested_image_mode=requested_image_mode,
@@ -129,13 +133,38 @@ def fail_scan_run(
     scan_run_id: str,
     *,
     error_message: str,
+    failure_type: str | None = None,
+    attempts: list[dict[str, Any]] | tuple[dict[str, Any], ...] = (),
 ) -> None:
     db.rollback()
     run = db.query(CurationScanRun).filter(CurationScanRun.id == scan_run_id).first()
     if not run:
         return
+    normalized_attempts = [
+        {
+            "method": str(attempt.get("method") or "unknown"),
+            "status": str(attempt.get("status") or "failed"),
+            "detail": str(attempt.get("detail") or "No failure detail recorded."),
+        }
+        for attempt in attempts
+        if isinstance(attempt, dict)
+    ]
     run.status = "failed"
     run.error_message = error_message
+    if normalized_attempts or failure_type:
+        last_method = (
+            normalized_attempts[-1]["method"]
+            if normalized_attempts
+            else "not_completed"
+        )
+        run.summary = {
+            "failure_type": failure_type or "collection_scan_failed",
+            "discovery": {
+                "method": last_method,
+                "fallback_used": len(normalized_attempts) > 1,
+                "attempts": normalized_attempts,
+            },
+        }
     run.completed_at = datetime.now(timezone.utc)
     db.commit()
 
@@ -237,7 +266,10 @@ def list_scanned_stores(
             stores[store_key] = store
 
         store["scan_count"] += 1
-        if run.target_city_slug not in store["city_slugs"]:
+        if (
+            run.target_city_slug
+            and run.target_city_slug not in store["city_slugs"]
+        ):
             store["city_slugs"].append(run.target_city_slug)
 
     return list(stores.values())
@@ -253,7 +285,9 @@ def scan_run_payload(
         "status": run.status,
         "source_url": run.source_url,
         "source_host": run.source_host,
+        "collection_id": run.collection_id,
         "merchant_name": run.merchant_name,
+        "city_mode": run.city_mode,
         "target_city_slug": run.target_city_slug,
         "normalized_category": run.normalized_category,
         "scanner": run.scanner_name,

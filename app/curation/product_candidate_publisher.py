@@ -6,12 +6,12 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.curation.affiliate_links import AFFILIATE_VERIFIED
-from app.curation.candidate_queue import candidate_has_active_product
-from app.curation.eligibility import INELIGIBLE, evaluate_candidate_eligibility
-from app.curation.platform_alignment import (
-    PLATFORM_ALIGNMENT_THRESHOLD,
-    platform_alignment_passes,
+from app.curation.candidate_queue import (
+    candidate_has_active_product,
+    haroona_selection_failure,
 )
+from app.curation.eligibility import INELIGIBLE, evaluate_candidate_eligibility
+from app.curation.scoring import HAROONA_SELECTION_THRESHOLD
 from app.models import Brand, City, Product, ProductCandidate
 
 
@@ -133,6 +133,9 @@ def _require_publishable(candidate: ProductCandidate, city: City | None) -> None
             "Affiliate link must be generated, tested, and manually verified before publishing"
         )
 
+    if not candidate.target_city_slug:
+        raise ValueError("A final city must be assigned before publishing")
+
     if not city:
         raise ValueError(f"City '{candidate.target_city_slug}' does not exist yet")
 
@@ -151,14 +154,9 @@ def _require_publishable(candidate: ProductCandidate, city: City | None) -> None
     if eligibility.status == INELIGIBLE:
         reasons = ", ".join(eligibility.blocking_reasons)
         raise ValueError(f"Candidate is not eligible to publish: {reasons}")
-    if not platform_alignment_passes(candidate.platform_alignment_score):
-        if candidate.platform_alignment_score is None:
-            raise ValueError("Candidate must be rescored with Batch 3 before publishing")
-        raise ValueError(
-            "Candidate platform alignment "
-            f"{candidate.platform_alignment_score}/10 is below the "
-            f"{PLATFORM_ALIGNMENT_THRESHOLD}/10 threshold"
-        )
+    selection_failure = haroona_selection_failure(candidate)
+    if selection_failure:
+        raise ValueError(f"Candidate is not publishable: {selection_failure}")
 
 
 def _get_or_create_brand(db: Session, name: str, country_id: int) -> Brand:
@@ -292,8 +290,9 @@ def publish_approved_product_candidates(
     query = (
         db.query(ProductCandidate)
         .filter(ProductCandidate.review_status == "approved")
+        .filter(ProductCandidate.target_city_slug.isnot(None))
         .filter(ProductCandidate.affiliate_link_status == AFFILIATE_VERIFIED)
-        .filter(ProductCandidate.platform_alignment_score >= PLATFORM_ALIGNMENT_THRESHOLD)
+        .filter(ProductCandidate.haroona_score >= HAROONA_SELECTION_THRESHOLD)
         .filter(~candidate_has_active_product())
         .order_by(ProductCandidate.city_fit_score.desc(), ProductCandidate.id.desc())
     )

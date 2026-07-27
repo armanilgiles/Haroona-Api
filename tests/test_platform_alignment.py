@@ -31,6 +31,8 @@ class PlatformAlignmentTests(unittest.TestCase):
         self.assertLess(result.score, PLATFORM_ALIGNMENT_THRESHOLD)
         self.assertFalse(result.passes)
         self.assertFalse(platform_alignment_passes(result.score))
+        self.assertIn("advisory", result.reasons[-1].lower())
+        self.assertIn("curator review", result.reasons[-1].lower())
 
     def test_recognized_editorial_brand_can_pass_without_merchant_profile_leakage(self):
         result = self._score(

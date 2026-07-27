@@ -149,6 +149,8 @@ class CandidateQueueTests(unittest.TestCase):
             review_status="approved",
             product_is_active=False,
         )
+        candidate.platform_alignment_score = 6.2
+        self.db.commit()
 
         result = publish_approved_product_candidates(self.db, target_city_slug="london")
 
@@ -184,6 +186,17 @@ class CandidateQueueTests(unittest.TestCase):
             "https://tracking.example.com/separate-links",
         )
         self.assertTrue(product.is_affiliate)
+
+    def test_low_platform_advisory_does_not_block_publish(self):
+        candidate = self._candidate("low-platform-publish", review_status="approved")
+        candidate.platform_alignment_score = 6.2
+        self.db.commit()
+
+        result = publish_product_candidate(self.db, candidate)
+
+        product = self.db.query(Product).filter(Product.id == result["product_id"]).one()
+        self.assertTrue(product.is_active)
+        self.assertEqual(float(candidate.platform_alignment_score), 6.2)
 
     def test_restore_live_requires_verified_affiliate_link(self):
         candidate = self._candidate(
@@ -258,9 +271,25 @@ class CandidateQueueTests(unittest.TestCase):
         self.assertEqual(candidate.review_status, "pending")
         self.assertEqual(candidate.eligibility_status, "ineligible")
 
-    def test_candidate_below_platform_threshold_cannot_be_approved(self):
+    def test_candidate_below_platform_advisory_can_be_approved(self):
         candidate = self._candidate("low-platform", review_status="pending")
         candidate.platform_alignment_score = 6.9
+        self.db.commit()
+
+        result = approve_candidate(
+            self.db,
+            candidate,
+            reviewed_by="test-curator",
+        )
+
+        self.assertEqual(result["review_status"], "approved")
+        self.assertEqual(candidate.review_status, "approved")
+        self.assertEqual(float(candidate.platform_alignment_score), 6.9)
+
+    def test_candidate_below_haroona_selection_threshold_cannot_be_approved(self):
+        candidate = self._candidate("low-city-fit", review_status="pending")
+        candidate.city_fit_score = 79
+        candidate.haroona_score = 79
         self.db.commit()
 
         with self.assertRaises(CandidateTransitionError) as raised:
@@ -270,7 +299,24 @@ class CandidateQueueTests(unittest.TestCase):
                 reviewed_by="test-curator",
             )
 
-        self.assertIn("below the 7.0/10 threshold", str(raised.exception))
+        self.assertIn("79/100 is below the 80/100 threshold", str(raised.exception))
+        self.assertEqual(candidate.review_status, "pending")
+
+    def test_strict_candidate_without_gate_result_must_be_rescored(self):
+        candidate = self._candidate("strict-missing-gate", review_status="pending")
+        candidate.scoring_mode = "strict_distinctiveness"
+        candidate.scoring_version = "strict_distinctiveness_v2"
+        candidate.scoring_analysis = {}
+        self.db.commit()
+
+        with self.assertRaises(CandidateTransitionError) as raised:
+            approve_candidate(
+                self.db,
+                candidate,
+                reviewed_by="test-curator",
+            )
+
+        self.assertIn("result is missing", str(raised.exception))
         self.assertEqual(candidate.review_status, "pending")
 
 

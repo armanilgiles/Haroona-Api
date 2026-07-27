@@ -16,6 +16,10 @@ FALLBACK_CATEGORIES = (
     "bags",
     "accessories",
     "jewelry",
+    "swimwear",
+    "activewear",
+    "sweaters_knitwear",
+    "outerwear",
 )
 
 SCANNER_IMAGE_CAPABILITIES: dict[str, tuple[tuple[str, ...], str]] = {
@@ -58,6 +62,26 @@ _CATEGORY_ALIASES: dict[str, str | None] = {
     "accessories": "accessories",
     "jewellery": "jewelry",
     "jewelry": "jewelry",
+    "swim": "swimwear",
+    "swimsuit": "swimwear",
+    "swimsuits": "swimwear",
+    "swimwear": "swimwear",
+    "active": "activewear",
+    "athleisure": "activewear",
+    "activewear": "activewear",
+    "sweater": "sweaters_knitwear",
+    "sweaters": "sweaters_knitwear",
+    "cardigan": "sweaters_knitwear",
+    "cardigans": "sweaters_knitwear",
+    "knit": "sweaters_knitwear",
+    "knits": "sweaters_knitwear",
+    "knitwear": "sweaters_knitwear",
+    "sweaters-knitwear": "sweaters_knitwear",
+    "coat": "outerwear",
+    "coats": "outerwear",
+    "jacket": "outerwear",
+    "jackets": "outerwear",
+    "outerwear": "outerwear",
 }
 
 
