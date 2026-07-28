@@ -1,4 +1,5 @@
 import unittest
+from datetime import datetime, timezone
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -81,6 +82,8 @@ class CandidateQueueTests(unittest.TestCase):
             merchant_url=f"https://shop.example.com/products/{external_id}",
             affiliate_link_status="verified",
             affiliate_sub_id=f"haroona-product-test-{external_id}",
+            affiliate_link_verified_at=datetime.now(timezone.utc),
+            affiliate_link_verified_by="test-curator",
             image_url=f"https://cdn.example.com/{external_id}.jpg",
             availability="in_stock",
             normalized_category="dress",
@@ -162,13 +165,15 @@ class CandidateQueueTests(unittest.TestCase):
 
     def test_unverified_candidate_cannot_be_published(self):
         candidate = self._candidate("not-verified", review_status="approved")
-        candidate.affiliate_link_status = "generated"
+        candidate.affiliate_link_status = "ready_to_verify"
+        candidate.affiliate_link_verified_at = None
+        candidate.affiliate_link_verified_by = None
         self.db.commit()
 
         with self.assertRaises(ValueError) as raised:
             publish_product_candidate(self.db, candidate)
 
-        self.assertIn("manually verified", str(raised.exception))
+        self.assertIn("Open and verify", str(raised.exception))
         self.assertIsNone(candidate.promoted_product_id)
 
     def test_publish_keeps_original_and_tracking_urls_separate(self):
@@ -216,7 +221,7 @@ class CandidateQueueTests(unittest.TestCase):
                 restore_to="live",
             )
 
-        self.assertIn("manually verified", str(raised.exception))
+        self.assertIn("Retry affiliate-link generation", str(raised.exception))
 
     def test_restore_to_pending_deactivates_a_stale_live_product(self):
         candidate = self._candidate(

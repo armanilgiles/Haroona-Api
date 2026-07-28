@@ -1234,9 +1234,8 @@ def _existing_candidates_by_key(
 
 def upsert_product_candidates(db: Session, payloads: list[CandidatePayload]) -> dict[str, int]:
     from app.curation.affiliate_links import (
-        AFFILIATE_FAILED,
-        AFFILIATE_GENERATED,
-        AFFILIATE_VERIFIED,
+        AFFILIATE_LINK_STATUSES,
+        LEGACY_AFFILIATE_LINK_STATUSES,
         reset_affiliate_link_after_product_url_change,
     )
 
@@ -1287,8 +1286,8 @@ def upsert_product_candidates(db: Session, payloads: list[CandidatePayload]) -> 
         if product_url_changed:
             reset_affiliate_link_after_product_url_change(record)
         elif not is_existing or (
-            (record.affiliate_link_status or "not_requested")
-            not in {AFFILIATE_GENERATED, AFFILIATE_VERIFIED, AFFILIATE_FAILED}
+            (record.affiliate_link_status or "not_generated")
+            not in AFFILIATE_LINK_STATUSES | LEGACY_AFFILIATE_LINK_STATUSES
         ):
             record.affiliate_url = payload.affiliate_url
         record.merchant_url = payload.merchant_url

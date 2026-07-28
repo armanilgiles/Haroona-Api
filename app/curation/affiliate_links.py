@@ -1,41 +1,71 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
-import os
+from datetime import datetime, timedelta, timezone
+import logging
+import re
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urlsplit
 
-import requests
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.curation.takeads_client import (
+    TakeadsClient,
+    TakeadsClientError,
+    TakeadsResolveResult,
+)
 from app.models import Product, ProductCandidate
 
 
-TAKEADS_RESOLVE_URL = "https://api.takeads.com/v1/product/monetize-api/v2/resolve"
-TAKEADS_REQUEST_TIMEOUT_SECONDS = 15
+logger = logging.getLogger(__name__)
 
-AFFILIATE_NOT_REQUESTED = "not_requested"
-AFFILIATE_GENERATED = "generated"
+AFFILIATE_NOT_GENERATED = "not_generated"
+AFFILIATE_GENERATING = "generating"
+AFFILIATE_READY_TO_VERIFY = "ready_to_verify"
 AFFILIATE_VERIFIED = "verified"
+AFFILIATE_NO_ELIGIBLE_OFFER = "no_eligible_offer"
 AFFILIATE_FAILED = "failed"
+AFFILIATE_INVALID = "invalid"
+
+# Compatibility aliases for older internal imports. The canonical persisted
+# values are the constants above.
+AFFILIATE_NOT_REQUESTED = AFFILIATE_NOT_GENERATED
+AFFILIATE_GENERATED = AFFILIATE_READY_TO_VERIFY
 
 AFFILIATE_LINK_STATUSES = {
-    AFFILIATE_NOT_REQUESTED,
-    AFFILIATE_GENERATED,
+    AFFILIATE_NOT_GENERATED,
+    AFFILIATE_GENERATING,
+    AFFILIATE_READY_TO_VERIFY,
     AFFILIATE_VERIFIED,
+    AFFILIATE_NO_ELIGIBLE_OFFER,
     AFFILIATE_FAILED,
+    AFFILIATE_INVALID,
 }
+LEGACY_AFFILIATE_LINK_STATUSES = {"not_requested", "generated"}
+
+TAKEADS_PROVIDER = "takeads"
+AFFILIATE_GENERATION_STALE_AFTER = timedelta(minutes=2)
+_SUB_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 class AffiliateLinkTransitionError(ValueError):
     pass
 
 
-class TakeadsResolveError(RuntimeError):
-    def __init__(self, code: str, message: str) -> None:
-        super().__init__(message)
-        self.code = code
-        self.message = message
+class AffiliateLinkPersistenceError(RuntimeError):
+    pass
+
+
+class AffiliateLinkPublicationError(ValueError):
+    code = "AFFILIATE_LINK_NOT_VERIFIED"
+    message = (
+        "The affiliate link must be generated and verified before this product "
+        "can be published."
+    )
+
+    def __init__(self, message: str | None = None) -> None:
+        super().__init__(message or self.message)
+        self.message = message or self.message
 
 
 def _clean(value: str | None) -> str | None:
@@ -47,34 +77,99 @@ def _valid_http_url(value: str | None) -> bool:
     cleaned = _clean(value)
     if not cleaned:
         return False
-    parsed = urlparse(cleaned)
-    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+    parsed = urlsplit(cleaned)
+    return parsed.scheme.lower() in {"http", "https"} and bool(parsed.netloc)
+
+
+def _canonical_status(value: str | None) -> str:
+    normalized = _clean(value) or AFFILIATE_NOT_GENERATED
+    if normalized == "not_requested":
+        return AFFILIATE_NOT_GENERATED
+    if normalized == "generated":
+        return AFFILIATE_READY_TO_VERIFY
+    return normalized
+
+
+def _as_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def _affiliate_sub_id(candidate: ProductCandidate) -> str:
-    if candidate.affiliate_sub_id:
-        return candidate.affiliate_sub_id
+    current = _clean(candidate.affiliate_sub_id)
+    if current:
+        if not _SUB_ID_PATTERN.fullmatch(current):
+            raise AffiliateLinkTransitionError(
+                "The saved affiliate SubID contains unsupported characters"
+            )
+        return current
     if not candidate.id:
         raise AffiliateLinkTransitionError(
             "Candidate must be saved before an affiliate link can be generated"
         )
-    candidate.affiliate_sub_id = f"haroona-product-{candidate.id}"
+    candidate.affiliate_sub_id = f"haroona_product_{candidate.id}"
     return candidate.affiliate_sub_id
 
 
 def affiliate_link_payload(candidate: ProductCandidate) -> dict[str, Any]:
     return {
-        "status": candidate.affiliate_link_status or AFFILIATE_NOT_REQUESTED,
+        "provider": candidate.affiliate_provider,
+        "provider_reference": candidate.affiliate_provider_reference,
+        "status": _canonical_status(candidate.affiliate_link_status),
         "affiliate_url": candidate.affiliate_url,
+        "original_product_url": candidate.merchant_url,
         "merchant_url": candidate.merchant_url,
         "sub_id": candidate.affiliate_sub_id,
+        "attempt_count": candidate.affiliate_link_attempt_count or 0,
         "error_code": candidate.affiliate_link_error_code,
         "error_message": candidate.affiliate_link_error_message,
         "last_attempted_at": candidate.affiliate_link_last_attempted_at,
         "generated_at": candidate.affiliate_link_generated_at,
         "verified_at": candidate.affiliate_link_verified_at,
         "verified_by": candidate.affiliate_link_verified_by,
+        "invalidated_at": candidate.affiliate_link_invalidated_at,
+        "invalidated_by": candidate.affiliate_link_invalidated_by,
     }
+
+
+def affiliate_link_is_publishable(candidate: ProductCandidate) -> bool:
+    return bool(
+        _canonical_status(candidate.affiliate_link_status) == AFFILIATE_VERIFIED
+        and _valid_http_url(candidate.affiliate_url)
+        and candidate.affiliate_link_verified_at is not None
+    )
+
+
+def affiliate_link_publish_block_reason(candidate: ProductCandidate) -> str | None:
+    if affiliate_link_is_publishable(candidate):
+        return None
+
+    status = _canonical_status(candidate.affiliate_link_status)
+    if status == AFFILIATE_GENERATING:
+        return "Wait for affiliate-link generation to finish before publishing."
+    if status == AFFILIATE_READY_TO_VERIFY:
+        return "Open and verify the affiliate link before publishing."
+    if status == AFFILIATE_NO_ELIGIBLE_OFFER:
+        return "This product has no eligible Takeads offer."
+    if status == AFFILIATE_FAILED:
+        return "Retry affiliate-link generation before publishing."
+    if status == AFFILIATE_INVALID:
+        return (
+            "The affiliate link was reported invalid. Regenerate and verify it "
+            "before publishing."
+        )
+    if status == AFFILIATE_VERIFIED:
+        return "Affiliate verification is incomplete. Verify the link again."
+    return "Generate an affiliate link before publishing."
+
+
+def require_publishable_affiliate_link(candidate: ProductCandidate) -> None:
+    reason = affiliate_link_publish_block_reason(candidate)
+    if reason:
+        raise AffiliateLinkPublicationError(reason)
 
 
 def resolve_candidate_workflow_status(
@@ -90,246 +185,378 @@ def resolve_candidate_workflow_status(
     if review_status != "approved":
         return review_status
 
-    affiliate_status = candidate.affiliate_link_status or AFFILIATE_NOT_REQUESTED
-    if affiliate_status == AFFILIATE_GENERATED:
-        return "affiliate_link_generated"
-    if affiliate_status == AFFILIATE_VERIFIED:
-        return "affiliate_link_verified"
-    if affiliate_status == AFFILIATE_FAILED:
-        return "affiliate_link_failed"
-    return "approved"
+    affiliate_status = _canonical_status(candidate.affiliate_link_status)
+    return {
+        AFFILIATE_GENERATING: "affiliate_link_generating",
+        AFFILIATE_READY_TO_VERIFY: "affiliate_link_ready_to_verify",
+        AFFILIATE_VERIFIED: "affiliate_link_verified",
+        AFFILIATE_NO_ELIGIBLE_OFFER: "affiliate_link_no_eligible_offer",
+        AFFILIATE_FAILED: "affiliate_link_failed",
+        AFFILIATE_INVALID: "affiliate_link_invalid",
+    }.get(affiliate_status, "approved")
 
 
-def _error_for_status(status_code: int) -> TakeadsResolveError:
-    if status_code == 400:
-        return TakeadsResolveError(
-            "invalid_product_url",
-            "Takeads could not process this product URL. Confirm the original product link and retry.",
-        )
-    if status_code == 401:
-        return TakeadsResolveError(
-            "takeads_unauthorized",
-            "Takeads rejected the backend platform key. Check TAKEADS_PLATFORM_API_KEY.",
-        )
-    if status_code == 403:
-        return TakeadsResolveError(
-            "takeads_forbidden",
-            "This Takeads platform key is not allowed to monetize the product URL.",
-        )
-    if status_code == 429:
-        return TakeadsResolveError(
-            "takeads_rate_limited",
-            "Takeads is receiving too many requests. Wait briefly, then retry.",
-        )
-    if status_code in {500, 502, 503, 504}:
-        return TakeadsResolveError(
-            "takeads_unavailable",
-            "Takeads is temporarily unavailable. Retry in a moment.",
-        )
-    return TakeadsResolveError(
-        "takeads_request_failed",
-        f"Takeads could not generate the affiliate link (HTTP {status_code}). Retry in a moment.",
+def _locked_candidate(db: Session, candidate_id: int) -> ProductCandidate:
+    candidate = (
+        db.query(ProductCandidate)
+        .filter(ProductCandidate.id == candidate_id)
+        .with_for_update()
+        .populate_existing()
+        .first()
     )
+    if not candidate:
+        raise AffiliateLinkTransitionError("Candidate not found")
+    return candidate
 
 
-def _request_takeads_link(*, product_url: str, sub_id: str) -> str:
-    platform_key = _clean(os.getenv("TAKEADS_PLATFORM_API_KEY"))
-    if not platform_key:
-        raise TakeadsResolveError(
-            "takeads_not_configured",
-            "Affiliate link generation is not configured. Add TAKEADS_PLATFORM_API_KEY to the backend environment.",
-        )
-
-    try:
-        response = requests.put(
-            TAKEADS_RESOLVE_URL,
-            headers={
-                "Authorization": f"Bearer {platform_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "iris": [product_url],
-                "subId": sub_id,
-                "withImages": False,
-            },
-            timeout=TAKEADS_REQUEST_TIMEOUT_SECONDS,
-        )
-    except requests.Timeout as exc:
-        raise TakeadsResolveError(
-            "takeads_timeout",
-            "Takeads did not respond in time. Retry the affiliate link.",
-        ) from exc
-    except requests.RequestException as exc:
-        raise TakeadsResolveError(
-            "takeads_unavailable",
-            "Takeads could not be reached. Check the backend connection and retry.",
-        ) from exc
-
-    if not 200 <= response.status_code < 300:
-        raise _error_for_status(response.status_code)
-
-    try:
-        body = response.json()
-    except ValueError as exc:
-        raise TakeadsResolveError(
-            "takeads_invalid_response",
-            "Takeads returned an unreadable response. Retry in a moment.",
-        ) from exc
-
-    data = body.get("data") if isinstance(body, dict) else None
-    if not isinstance(data, list) or not data:
-        raise TakeadsResolveError(
-            "takeads_unsupported_product",
-            "Takeads could not monetize this product URL. The merchant may not be supported.",
-        )
-
-    matching_item = next(
-        (
-            item
-            for item in data
-            if isinstance(item, dict) and item.get("iri") == product_url
-        ),
-        data[0],
-    )
-    tracking_link = (
-        matching_item.get("trackingLink")
-        if isinstance(matching_item, dict)
-        else None
-    )
-    if not _valid_http_url(tracking_link):
-        raise TakeadsResolveError(
-            "takeads_missing_tracking_link",
-            "Takeads did not return a usable affiliate link for this product. Retry or check merchant support.",
-        )
-
-    return str(tracking_link).strip()
-
-
-def _mark_affiliate_failure(
-    candidate: ProductCandidate,
-    *,
-    code: str,
-    message: str,
-    attempted_at: datetime,
-) -> None:
-    candidate.affiliate_url = None
-    candidate.affiliate_link_status = AFFILIATE_FAILED
-    candidate.affiliate_link_error_code = code
-    candidate.affiliate_link_error_message = message
-    candidate.affiliate_link_last_attempted_at = attempted_at
-    candidate.affiliate_link_generated_at = None
-    candidate.affiliate_link_verified_at = None
-    candidate.affiliate_link_verified_by = None
-
-
-def resolve_takeads_affiliate_link(
+def _candidate_has_active_product(
     db: Session,
     candidate: ProductCandidate,
-) -> dict[str, Any]:
+) -> bool:
+    if not candidate.promoted_product_id:
+        return False
+    return bool(
+        db.query(Product.id)
+        .filter(Product.id == candidate.promoted_product_id)
+        .filter(Product.is_active.is_(True))
+        .first()
+    )
+
+
+def _generation_is_current(candidate: ProductCandidate, now: datetime) -> bool:
+    if _canonical_status(candidate.affiliate_link_status) != AFFILIATE_GENERATING:
+        return False
+    attempted_at = _as_utc(candidate.affiliate_link_last_attempted_at)
+    return bool(
+        attempted_at
+        and now - attempted_at < AFFILIATE_GENERATION_STALE_AFTER
+    )
+
+
+def _commit_or_raise(db: Session, *, operation: str) -> None:
+    try:
+        db.commit()
+    except SQLAlchemyError as exc:
+        db.rollback()
+        logger.exception(
+            "affiliate_link_persistence_failed operation=%s",
+            operation,
+        )
+        raise AffiliateLinkPersistenceError(
+            "The affiliate-link state could not be saved. Retry the operation."
+        ) from exc
+
+
+def _start_generation(
+    db: Session,
+    candidate_id: int,
+    *,
+    force: bool,
+) -> tuple[ProductCandidate, int] | dict[str, Any]:
+    candidate = _locked_candidate(db, candidate_id)
     if candidate.review_status != "approved":
         raise AffiliateLinkTransitionError(
             "Approve the product before generating its affiliate link"
         )
 
-    existing_status = candidate.affiliate_link_status or AFFILIATE_NOT_REQUESTED
+    now = datetime.now(timezone.utc)
+    status = _canonical_status(candidate.affiliate_link_status)
+    if _generation_is_current(candidate, now):
+        return {
+            **affiliate_link_payload(candidate),
+            "reused": True,
+            "in_progress": True,
+        }
+
     if (
-        existing_status in {AFFILIATE_GENERATED, AFFILIATE_VERIFIED}
+        not force
+        and status in {AFFILIATE_READY_TO_VERIFY, AFFILIATE_VERIFIED}
         and _valid_http_url(candidate.affiliate_url)
     ):
-        return {**affiliate_link_payload(candidate), "reused": True}
+        return {
+            **affiliate_link_payload(candidate),
+            "reused": True,
+            "in_progress": False,
+        }
 
-    sub_id = _affiliate_sub_id(candidate)
-    attempted_at = datetime.now(timezone.utc)
+    if force and _candidate_has_active_product(db, candidate):
+        raise AffiliateLinkTransitionError(
+            "Unpublish the product before regenerating its affiliate link"
+        )
+
     product_url = _clean(candidate.merchant_url)
     if not _valid_http_url(product_url):
-        _mark_affiliate_failure(
-            candidate,
-            code="invalid_product_url",
-            message="The original product URL is missing or invalid. Correct it before retrying.",
-            attempted_at=attempted_at,
+        candidate.affiliate_link_status = AFFILIATE_FAILED
+        candidate.affiliate_link_error_code = "invalid_product_url"
+        candidate.affiliate_link_error_message = (
+            "The original product URL is missing or invalid. Correct it before retrying."
         )
-        db.commit()
-        return {**affiliate_link_payload(candidate), "reused": False}
+        candidate.affiliate_link_last_attempted_at = now
+        candidate.affiliate_link_verified_at = None
+        candidate.affiliate_link_verified_by = None
+        _commit_or_raise(db, operation="record_invalid_product_url")
+        return {
+            **affiliate_link_payload(candidate),
+            "reused": False,
+            "in_progress": False,
+        }
+
+    _affiliate_sub_id(candidate)
+    attempt_number = (candidate.affiliate_link_attempt_count or 0) + 1
+    candidate.affiliate_provider = TAKEADS_PROVIDER
+    candidate.affiliate_link_status = AFFILIATE_GENERATING
+    candidate.affiliate_link_attempt_count = attempt_number
+    candidate.affiliate_link_last_attempted_at = now
+    candidate.affiliate_link_error_code = None
+    candidate.affiliate_link_error_message = None
+    candidate.affiliate_link_verified_at = None
+    candidate.affiliate_link_verified_by = None
+    _commit_or_raise(db, operation="start_generation")
+    logger.info(
+        "affiliate_link_generation_started product_id=%s provider=%s attempt=%s",
+        candidate.id,
+        TAKEADS_PROVIDER,
+        attempt_number,
+    )
+    return candidate, attempt_number
+
+
+def _finalize_generation(
+    db: Session,
+    *,
+    candidate_id: int,
+    attempt_number: int,
+    result: TakeadsResolveResult | None = None,
+    error: TakeadsClientError | None = None,
+) -> dict[str, Any]:
+    candidate = _locked_candidate(db, candidate_id)
+    current_attempt = candidate.affiliate_link_attempt_count or 0
+    current_status = _canonical_status(candidate.affiliate_link_status)
+    if (
+        current_attempt != attempt_number
+        or current_status != AFFILIATE_GENERATING
+    ):
+        logger.warning(
+            "affiliate_link_stale_result_ignored product_id=%s provider=%s attempt=%s current_attempt=%s current_status=%s",
+            candidate.id,
+            TAKEADS_PROVIDER,
+            attempt_number,
+            current_attempt,
+            current_status,
+        )
+        return {
+            **affiliate_link_payload(candidate),
+            "reused": True,
+            "in_progress": current_status == AFFILIATE_GENERATING,
+            "stale_result_ignored": True,
+        }
+
+    now = datetime.now(timezone.utc)
+    if error is not None:
+        candidate.affiliate_link_status = AFFILIATE_FAILED
+        candidate.affiliate_link_error_code = error.code
+        candidate.affiliate_link_error_message = error.message
+        _commit_or_raise(db, operation="record_provider_failure")
+        logger.warning(
+            "affiliate_link_generation_failed product_id=%s provider=%s attempt=%s http_status=%s code=%s",
+            candidate.id,
+            TAKEADS_PROVIDER,
+            attempt_number,
+            error.http_status,
+            error.code,
+        )
+        return {
+            **affiliate_link_payload(candidate),
+            "reused": False,
+            "in_progress": False,
+        }
+
+    assert result is not None
+    if result.no_eligible_offer:
+        candidate.affiliate_url = None
+        candidate.affiliate_provider_reference = None
+        candidate.affiliate_link_status = AFFILIATE_NO_ELIGIBLE_OFFER
+        candidate.affiliate_link_generated_at = None
+        candidate.affiliate_link_error_code = "takeads_no_eligible_offer"
+        candidate.affiliate_link_error_message = (
+            "Takeads did not find an eligible affiliate offer for this product URL."
+        )
+        _commit_or_raise(db, operation="record_no_eligible_offer")
+        logger.info(
+            "affiliate_link_no_eligible_offer product_id=%s provider=%s attempt=%s",
+            candidate.id,
+            TAKEADS_PROVIDER,
+            attempt_number,
+        )
+        return {
+            **affiliate_link_payload(candidate),
+            "reused": False,
+            "in_progress": False,
+        }
+
+    candidate.affiliate_url = result.tracking_link
+    candidate.affiliate_provider_reference = result.returned_iri
+    candidate.affiliate_link_status = AFFILIATE_READY_TO_VERIFY
+    candidate.affiliate_link_generated_at = now
+    candidate.affiliate_link_error_code = None
+    candidate.affiliate_link_error_message = None
+    _commit_or_raise(db, operation="record_generated_link")
+    logger.info(
+        "affiliate_link_ready_to_verify product_id=%s provider=%s attempt=%s",
+        candidate.id,
+        TAKEADS_PROVIDER,
+        attempt_number,
+    )
+    return {
+        **affiliate_link_payload(candidate),
+        "reused": False,
+        "in_progress": False,
+    }
+
+
+def resolve_takeads_affiliate_link(
+    db: Session,
+    candidate: ProductCandidate,
+    *,
+    force: bool = False,
+    client: TakeadsClient | None = None,
+) -> dict[str, Any]:
+    if not candidate.id:
+        raise AffiliateLinkTransitionError(
+            "Candidate must be saved before an affiliate link can be generated"
+        )
+
+    started = _start_generation(db, candidate.id, force=force)
+    if isinstance(started, dict):
+        return started
+
+    active_candidate, attempt_number = started
+    product_url = _clean(active_candidate.merchant_url)
+    sub_id = _clean(active_candidate.affiliate_sub_id)
+    assert product_url is not None
+    assert sub_id is not None
 
     try:
-        tracking_link = _request_takeads_link(
+        result = (client or TakeadsClient()).resolve_product_url(
             product_url=product_url,
             sub_id=sub_id,
         )
-    except TakeadsResolveError as exc:
-        _mark_affiliate_failure(
-            candidate,
-            code=exc.code,
-            message=exc.message,
-            attempted_at=attempted_at,
+    except TakeadsClientError as exc:
+        return _finalize_generation(
+            db,
+            candidate_id=active_candidate.id,
+            attempt_number=attempt_number,
+            error=exc,
         )
-        db.commit()
-        return {**affiliate_link_payload(candidate), "reused": False}
 
-    candidate.affiliate_url = tracking_link
-    candidate.affiliate_link_status = AFFILIATE_GENERATED
-    candidate.affiliate_link_error_code = None
-    candidate.affiliate_link_error_message = None
-    candidate.affiliate_link_last_attempted_at = attempted_at
-    candidate.affiliate_link_generated_at = attempted_at
-    candidate.affiliate_link_verified_at = None
-    candidate.affiliate_link_verified_by = None
-    db.commit()
-    return {**affiliate_link_payload(candidate), "reused": False}
+    return _finalize_generation(
+        db,
+        candidate_id=active_candidate.id,
+        attempt_number=attempt_number,
+        result=result,
+    )
 
 
 def verify_candidate_affiliate_link(
     db: Session,
     candidate: ProductCandidate,
     *,
-    verified: bool,
     verified_by: str,
 ) -> dict[str, Any]:
-    current_status = candidate.affiliate_link_status or AFFILIATE_NOT_REQUESTED
-    if current_status not in {AFFILIATE_GENERATED, AFFILIATE_VERIFIED}:
+    if not candidate.id:
+        raise AffiliateLinkTransitionError("Candidate not found")
+    locked = _locked_candidate(db, candidate.id)
+    current_status = _canonical_status(locked.affiliate_link_status)
+    if (
+        current_status == AFFILIATE_VERIFIED
+        and locked.affiliate_link_verified_at is not None
+        and _valid_http_url(locked.affiliate_url)
+    ):
+        return {**affiliate_link_payload(locked), "reused": True}
+    if current_status != AFFILIATE_READY_TO_VERIFY:
         raise AffiliateLinkTransitionError(
-            "Generate and test an affiliate link before recording verification"
+            "Generate and inspect an affiliate link before marking it verified"
         )
-    if not _valid_http_url(candidate.affiliate_url):
+    if not _valid_http_url(locked.affiliate_url):
         raise AffiliateLinkTransitionError(
             "The candidate does not have a usable generated affiliate link"
         )
-    if not verified and candidate.promoted_product_id:
-        active_product = (
-            db.query(Product)
-            .filter(Product.id == candidate.promoted_product_id)
-            .filter(Product.is_active.is_(True))
-            .first()
-        )
-        if active_product:
-            raise AffiliateLinkTransitionError(
-                "Unpublish the product before marking its affiliate link as incorrect"
-            )
 
     now = datetime.now(timezone.utc)
-    if verified:
-        candidate.affiliate_link_status = AFFILIATE_VERIFIED
-        candidate.affiliate_link_verified_at = now
-        candidate.affiliate_link_verified_by = verified_by
-        candidate.affiliate_link_error_code = None
-        candidate.affiliate_link_error_message = None
-    else:
-        _mark_affiliate_failure(
-            candidate,
-            code="manual_verification_failed",
-            message="The generated link did not open the correct product. Retry to request a new link.",
-            attempted_at=candidate.affiliate_link_last_attempted_at or now,
+    locked.affiliate_link_status = AFFILIATE_VERIFIED
+    locked.affiliate_link_verified_at = now
+    locked.affiliate_link_verified_by = verified_by
+    locked.affiliate_link_error_code = None
+    locked.affiliate_link_error_message = None
+    _commit_or_raise(db, operation="verify_link")
+    logger.info(
+        "affiliate_link_verified product_id=%s provider=%s curator_user_id=%s",
+        locked.id,
+        locked.affiliate_provider or TAKEADS_PROVIDER,
+        verified_by,
+    )
+    return {**affiliate_link_payload(locked), "reused": False}
+
+
+def invalidate_candidate_affiliate_link(
+    db: Session,
+    candidate: ProductCandidate,
+    *,
+    invalidated_by: str,
+    reason: str | None = None,
+) -> dict[str, Any]:
+    if not candidate.id:
+        raise AffiliateLinkTransitionError("Candidate not found")
+    locked = _locked_candidate(db, candidate.id)
+    current_status = _canonical_status(locked.affiliate_link_status)
+    if current_status not in {
+        AFFILIATE_READY_TO_VERIFY,
+        AFFILIATE_VERIFIED,
+        AFFILIATE_INVALID,
+    }:
+        raise AffiliateLinkTransitionError(
+            "Only a generated affiliate link can be reported invalid"
+        )
+    if not _valid_http_url(locked.affiliate_url):
+        raise AffiliateLinkTransitionError(
+            "The candidate does not have a generated affiliate link"
+        )
+    if _candidate_has_active_product(db, locked):
+        raise AffiliateLinkTransitionError(
+            "Unpublish the product before reporting its affiliate link invalid"
         )
 
-    db.commit()
-    return affiliate_link_payload(candidate)
+    if current_status == AFFILIATE_INVALID:
+        return {**affiliate_link_payload(locked), "reused": True}
+
+    now = datetime.now(timezone.utc)
+    locked.affiliate_link_status = AFFILIATE_INVALID
+    locked.affiliate_link_verified_at = None
+    locked.affiliate_link_verified_by = None
+    locked.affiliate_link_invalidated_at = now
+    locked.affiliate_link_invalidated_by = invalidated_by
+    locked.affiliate_link_error_code = "manual_verification_failed"
+    locked.affiliate_link_error_message = (
+        _clean(reason)
+        or "The generated affiliate link did not open the correct product."
+    )
+    _commit_or_raise(db, operation="invalidate_link")
+    logger.warning(
+        "affiliate_link_invalidated product_id=%s provider=%s curator_user_id=%s",
+        locked.id,
+        locked.affiliate_provider or TAKEADS_PROVIDER,
+        invalidated_by,
+    )
+    return {**affiliate_link_payload(locked), "reused": False}
 
 
 def reset_affiliate_link_after_product_url_change(
     candidate: ProductCandidate,
 ) -> None:
     candidate.affiliate_url = None
-    candidate.affiliate_link_status = AFFILIATE_NOT_REQUESTED
+    candidate.affiliate_provider = None
+    candidate.affiliate_provider_reference = None
+    candidate.affiliate_link_status = AFFILIATE_NOT_GENERATED
     candidate.affiliate_link_error_code = None
     candidate.affiliate_link_error_message = None
     candidate.affiliate_link_last_attempted_at = None

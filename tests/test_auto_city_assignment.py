@@ -1,4 +1,5 @@
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 from pydantic import ValidationError
@@ -329,6 +330,8 @@ class AutoCityPersistenceTests(unittest.TestCase):
             affiliate_url=f"https://tracking.example.com/{external_id}",
             merchant_url=f"https://shop.example.com/products/{external_id}",
             affiliate_link_status="verified",
+            affiliate_link_verified_at=datetime.now(timezone.utc),
+            affiliate_link_verified_by="test-curator",
             image_url=f"https://cdn.example.com/{external_id}.jpg",
             availability="in_stock",
             normalized_category="dress",

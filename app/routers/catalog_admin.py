@@ -59,7 +59,11 @@ from app.curation.merchant_collections import (
     normalize_collection_url,
 )
 from app.curation.affiliate_links import (
+    AffiliateLinkPersistenceError,
+    AffiliateLinkPublicationError,
     AffiliateLinkTransitionError,
+    affiliate_link_payload,
+    invalidate_candidate_affiliate_link,
     resolve_candidate_workflow_status,
     resolve_takeads_affiliate_link,
     verify_candidate_affiliate_link,
@@ -208,9 +212,12 @@ class ReviewCandidateRequest(BaseModel):
     reason: str | None = None
 
 
-class VerifyAffiliateLinkRequest(BaseModel):
-    verified: bool
-    verified_by: str = Field("curator-studio", min_length=2)
+class ResolveAffiliateLinkRequest(BaseModel):
+    force: bool = False
+
+
+class InvalidateAffiliateLinkRequest(BaseModel):
+    reason: str | None = Field(None, max_length=500)
 
 
 class PublishCandidateRequest(BaseModel):
@@ -231,6 +238,14 @@ class ArchiveCandidateRequest(BaseModel):
 class RestoreCandidateRequest(BaseModel):
     restored_by: str = Field("curator-studio", min_length=2)
     restore_to: str = Field("pending", min_length=2)
+
+
+def _admin_identity(admin_user) -> str:
+    return str(
+        getattr(admin_user, "email", None)
+        or getattr(admin_user, "id", None)
+        or "authenticated-admin"
+    )
 
 
 class ScoringSettingsUpdateRequest(BaseModel):
@@ -1855,14 +1870,20 @@ def list_product_candidates(
                 "currency": row.currency,
                 "affiliate_url": row.affiliate_url,
                 "merchant_url": row.merchant_url,
+                "original_product_url": row.merchant_url,
+                "affiliate_provider": row.affiliate_provider,
+                "affiliate_provider_reference": row.affiliate_provider_reference,
                 "affiliate_link_status": row.affiliate_link_status,
                 "affiliate_sub_id": row.affiliate_sub_id,
+                "affiliate_link_attempt_count": row.affiliate_link_attempt_count,
                 "affiliate_link_error_code": row.affiliate_link_error_code,
                 "affiliate_link_error_message": row.affiliate_link_error_message,
                 "affiliate_link_last_attempted_at": row.affiliate_link_last_attempted_at,
                 "affiliate_link_generated_at": row.affiliate_link_generated_at,
                 "affiliate_link_verified_at": row.affiliate_link_verified_at,
                 "affiliate_link_verified_by": row.affiliate_link_verified_by,
+                "affiliate_link_invalidated_at": row.affiliate_link_invalidated_at,
+                "affiliate_link_invalidated_by": row.affiliate_link_invalidated_by,
                 "image_url": row.image_url,
                 "availability": row.availability,
                 "normalized_category": row.normalized_category,
@@ -2035,13 +2056,13 @@ def update_product_candidate_city_assignment(
 def publish_approved_candidates(
     payload: PublishApprovedCandidatesRequest,
     db: Session = Depends(get_db),
-    _admin_user=Depends(get_admin_user),
+    admin_user=Depends(get_admin_user),
 ):
     return publish_approved_product_candidates(
         db,
         target_city_slug=payload.target_city_slug,
         limit=payload.limit,
-        published_by=payload.published_by,
+        published_by=_admin_identity(admin_user),
     )
 
 
@@ -2050,7 +2071,7 @@ def publish_candidate(
     candidate_id: int,
     payload: PublishCandidateRequest | None = None,
     db: Session = Depends(get_db),
-    _admin_user=Depends(get_admin_user),
+    admin_user=Depends(get_admin_user),
 ):
     row = db.query(ProductCandidate).filter(ProductCandidate.id == candidate_id).first()
     if not row:
@@ -2061,14 +2082,18 @@ def publish_candidate(
             detail="Archived candidates must be restored before publishing",
         )
 
-    payload = payload or PublishCandidateRequest()
-
     try:
         return publish_product_candidate(
             db,
             row,
-            published_by=payload.published_by,
+            published_by=_admin_identity(admin_user),
         )
+    except AffiliateLinkPublicationError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail={"code": exc.code, "message": exc.message},
+        ) from exc
     except ValueError as exc:
         db.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -2130,30 +2155,60 @@ def approve_product_candidate(
     candidate_id: int,
     payload: ReviewCandidateRequest | None = None,
     db: Session = Depends(get_db),
-    _admin_user=Depends(get_admin_user),
+    admin_user=Depends(get_admin_user),
 ):
     row = db.query(ProductCandidate).filter(ProductCandidate.id == candidate_id).first()
     if not row:
         raise HTTPException(status_code=404, detail="Candidate not found")
 
-    payload = payload or ReviewCandidateRequest()
     try:
-        approval = approve_candidate(
-            db,
-            row,
-            reviewed_by=payload.reviewed_by,
-        )
+        if row.review_status == "approved":
+            approval = {
+                "status": "ok",
+                "candidate_id": row.id,
+                "review_status": row.review_status,
+                "reused": True,
+            }
+        else:
+            approval = approve_candidate(
+                db,
+                row,
+                reviewed_by=_admin_identity(admin_user),
+            )
         db.refresh(row)
         affiliate = resolve_takeads_affiliate_link(db, row)
         return {**approval, "affiliate": affiliate}
     except CandidateTransitionError as exc:
         db.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except AffiliateLinkTransitionError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except AffiliateLinkPersistenceError as exc:
+        db.rollback()
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.get("/product-candidates/{candidate_id}/affiliate-link")
+def get_product_candidate_affiliate_link(
+    candidate_id: int,
+    db: Session = Depends(get_db),
+    _admin_user=Depends(get_admin_user),
+):
+    row = db.query(ProductCandidate).filter(ProductCandidate.id == candidate_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+    return {
+        "status": "ok",
+        "candidate_id": row.id,
+        "affiliate": affiliate_link_payload(row),
+    }
 
 
 @router.post("/product-candidates/{candidate_id}/affiliate-link/resolve")
 def resolve_product_candidate_affiliate_link(
     candidate_id: int,
+    payload: ResolveAffiliateLinkRequest | None = None,
     db: Session = Depends(get_db),
     _admin_user=Depends(get_admin_user),
 ):
@@ -2162,22 +2217,29 @@ def resolve_product_candidate_affiliate_link(
         raise HTTPException(status_code=404, detail="Candidate not found")
 
     try:
+        payload = payload or ResolveAffiliateLinkRequest()
         return {
             "status": "ok",
             "candidate_id": row.id,
-            "affiliate": resolve_takeads_affiliate_link(db, row),
+            "affiliate": resolve_takeads_affiliate_link(
+                db,
+                row,
+                force=payload.force,
+            ),
         }
     except AffiliateLinkTransitionError as exc:
         db.rollback()
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except AffiliateLinkPersistenceError as exc:
+        db.rollback()
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @router.post("/product-candidates/{candidate_id}/affiliate-link/verify")
 def verify_product_candidate_affiliate_link(
     candidate_id: int,
-    payload: VerifyAffiliateLinkRequest,
     db: Session = Depends(get_db),
-    _admin_user=Depends(get_admin_user),
+    admin_user=Depends(get_admin_user),
 ):
     row = db.query(ProductCandidate).filter(ProductCandidate.id == candidate_id).first()
     if not row:
@@ -2187,8 +2249,7 @@ def verify_product_candidate_affiliate_link(
         affiliate = verify_candidate_affiliate_link(
             db,
             row,
-            verified=payload.verified,
-            verified_by=payload.verified_by,
+            verified_by=_admin_identity(admin_user),
         )
         return {
             "status": "ok",
@@ -2197,7 +2258,42 @@ def verify_product_candidate_affiliate_link(
         }
     except AffiliateLinkTransitionError as exc:
         db.rollback()
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except AffiliateLinkPersistenceError as exc:
+        db.rollback()
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/product-candidates/{candidate_id}/affiliate-link/invalidate")
+def invalidate_product_candidate_affiliate_link(
+    candidate_id: int,
+    payload: InvalidateAffiliateLinkRequest | None = None,
+    db: Session = Depends(get_db),
+    admin_user=Depends(get_admin_user),
+):
+    row = db.query(ProductCandidate).filter(ProductCandidate.id == candidate_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+
+    try:
+        payload = payload or InvalidateAffiliateLinkRequest()
+        affiliate = invalidate_candidate_affiliate_link(
+            db,
+            row,
+            invalidated_by=_admin_identity(admin_user),
+            reason=payload.reason,
+        )
+        return {
+            "status": "ok",
+            "candidate_id": row.id,
+            "affiliate": affiliate,
+        }
+    except AffiliateLinkTransitionError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except AffiliateLinkPersistenceError as exc:
+        db.rollback()
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @router.patch("/product-candidates/{candidate_id}/reject")

@@ -5,7 +5,10 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.curation.affiliate_links import AFFILIATE_VERIFIED
+from app.curation.affiliate_links import (
+    AFFILIATE_VERIFIED,
+    require_publishable_affiliate_link,
+)
 from app.curation.candidate_queue import (
     candidate_has_active_product,
     haroona_selection_failure,
@@ -125,13 +128,7 @@ def _require_publishable(candidate: ProductCandidate, city: City | None) -> None
     if candidate.review_status != "approved":
         raise ValueError("Only approved candidates can be published")
 
-    if (
-        candidate.affiliate_link_status != AFFILIATE_VERIFIED
-        or not _clean(candidate.affiliate_url)
-    ):
-        raise ValueError(
-            "Affiliate link must be generated, tested, and manually verified before publishing"
-        )
+    require_publishable_affiliate_link(candidate)
 
     if not candidate.target_city_slug:
         raise ValueError("A final city must be assigned before publishing")
@@ -292,6 +289,8 @@ def publish_approved_product_candidates(
         .filter(ProductCandidate.review_status == "approved")
         .filter(ProductCandidate.target_city_slug.isnot(None))
         .filter(ProductCandidate.affiliate_link_status == AFFILIATE_VERIFIED)
+        .filter(ProductCandidate.affiliate_url.isnot(None))
+        .filter(ProductCandidate.affiliate_link_verified_at.isnot(None))
         .filter(ProductCandidate.haroona_score >= HAROONA_SELECTION_THRESHOLD)
         .filter(~candidate_has_active_product())
         .order_by(ProductCandidate.city_fit_score.desc(), ProductCandidate.id.desc())

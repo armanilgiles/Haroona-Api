@@ -1,4 +1,17 @@
-from sqlalchemy import Column, Integer, BigInteger, String, ForeignKey, UniqueConstraint, Numeric, Boolean, DateTime, Text, JSON
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    CheckConstraint,
+    Column,
+    DateTime,
+    ForeignKey,
+    Integer,
+    JSON,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.database import Base
@@ -429,15 +442,20 @@ class ProductCandidate(Base):
     affiliate_url = Column(Text, nullable=True)
     merchant_url = Column(Text, nullable=True)
     affiliate_link_status = Column(
-        String(30), nullable=False, default="not_requested", index=True
+        String(30), nullable=False, default="not_generated", index=True
     )
+    affiliate_provider = Column(String(30), nullable=True)
+    affiliate_provider_reference = Column(Text, nullable=True)
     affiliate_sub_id = Column(String(120), nullable=True, unique=True)
+    affiliate_link_attempt_count = Column(Integer, nullable=False, default=0)
     affiliate_link_error_code = Column(String(80), nullable=True)
     affiliate_link_error_message = Column(Text, nullable=True)
     affiliate_link_last_attempted_at = Column(DateTime(timezone=True), nullable=True)
     affiliate_link_generated_at = Column(DateTime(timezone=True), nullable=True)
     affiliate_link_verified_at = Column(DateTime(timezone=True), nullable=True)
     affiliate_link_verified_by = Column(String(255), nullable=True)
+    affiliate_link_invalidated_at = Column(DateTime(timezone=True), nullable=True)
+    affiliate_link_invalidated_by = Column(String(255), nullable=True)
     image_url = Column(Text, nullable=True)
     availability = Column(String(50), nullable=True, index=True)
     normalized_category = Column(String(80), nullable=True, index=True)
@@ -506,6 +524,13 @@ class ProductCandidate(Base):
 
     __table_args__ = (
         UniqueConstraint("source", "external_product_id", name="uq_product_candidates_source_external"),
+        CheckConstraint(
+            "affiliate_link_status IN ("
+            "'not_generated', 'generating', 'ready_to_verify', 'verified', "
+            "'no_eligible_offer', 'failed', 'invalid'"
+            ")",
+            name="ck_product_candidates_affiliate_link_status",
+        ),
     )
 
     def __repr__(self):
