@@ -560,6 +560,15 @@ def _product_from_meta(html: str, *, product_url: str) -> dict[str, Any] | None:
     )
 
 
+def extract_product_from_meta(
+    html: str,
+    *,
+    product_url: str,
+) -> dict[str, Any] | None:
+    """Return a product only when page-level metadata contains product signals."""
+    return _product_from_meta(html, product_url=product_url)
+
+
 def _fetch_product(
     product_url: str,
     *,

@@ -5,7 +5,7 @@ import logging
 from typing import Literal
 from urllib.parse import urlparse, urlunparse
 from uuid import uuid4
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import exists, func, or_
 from sqlalchemy.orm import Session
@@ -90,6 +90,13 @@ from app.curation.shopify_collection import (
     CollectionRateLimitedError,
     CollectionScanOptions,
 )
+from app.curation.single_product import (
+    NotProductPageError,
+    ProductPageFetchError,
+    ProductUrlValidationError,
+    import_single_product_candidate,
+    merchant_name_from_url,
+)
 from app.curation.source_scan_guardrails import (
     clean_merchant_name,
     get_merchant_source_guidance,
@@ -154,6 +161,46 @@ class CollectionScanRequest(BaseModel):
     @classmethod
     def normalize_fallback_category(cls, value):
         return normalize_category_hint(value)
+
+
+class SingleProductImportRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    url: str = Field(..., min_length=8, max_length=4000)
+    source_type: Literal["single_product"] = Field(..., alias="sourceType")
+    city_mode: CityScanMode = Field(..., alias="cityMode")
+    city_id: str | None = Field(None, alias="cityId", max_length=80)
+    category_id: str | None = Field(None, alias="categoryId", max_length=80)
+
+    @field_validator("url", mode="before")
+    @classmethod
+    def strip_product_url(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("city_id", mode="before")
+    @classmethod
+    def normalize_city_id(cls, value):
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            return value
+        cleaned = value.strip()
+        if cleaned.isdigit():
+            return cleaned
+        return cleaned.lower().replace("_", "-").replace(" ", "-") or None
+
+    @field_validator("category_id", mode="before")
+    @classmethod
+    def normalize_category_override(cls, value):
+        return normalize_category_hint(value)
+
+    @model_validator(mode="after")
+    def validate_city_override(self):
+        if self.city_mode == CityScanMode.SELECTED and not self.city_id:
+            raise ValueError("cityId is required when cityMode is 'selected'")
+        if self.city_mode == CityScanMode.AUTO and self.city_id:
+            raise ValueError("cityId must be omitted when cityMode is 'auto'")
+        return self
 
 
 class ReviewCandidateRequest(BaseModel):
@@ -1087,6 +1134,238 @@ def update_scoring_settings(
         enabled=payload.enabled,
         updated_by=payload.updated_by,
     ).as_dict()
+
+
+def _resolve_single_product_city_slug(
+    db: Session,
+    city_id: str | None,
+) -> str | None:
+    if not city_id:
+        return None
+    query = db.query(City)
+    row = (
+        query.filter(City.id == int(city_id)).first()
+        if city_id.isdigit()
+        else query.filter(City.slug == city_id).first()
+    )
+    if not row:
+        raise ValueError(
+            f"City '{city_id}' does not exist in the Haroona API yet."
+        )
+    return row.slug
+
+
+@router.post("/single-product-import")
+def import_single_product(
+    payload: SingleProductImportRequest,
+    db: Session = Depends(get_db),
+):
+    try:
+        target_city_slug = _resolve_single_product_city_slug(db, payload.city_id)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "type": "invalid_single_product_city",
+                "message": str(exc),
+            },
+        ) from exc
+    active_city_slugs = active_scoring_city_slugs(db)
+    if not active_city_slugs:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "type": "single_product_city_configuration_missing",
+                "message": (
+                    "Single-product analysis requires at least one registered "
+                    "Haroona city with a scoring profile."
+                ),
+            },
+        )
+    if (
+        payload.city_mode == CityScanMode.SELECTED
+        and target_city_slug not in active_city_slugs
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "type": "single_product_city_not_active",
+                "message": (
+                    f"City '{target_city_slug}' is not an active Haroona scoring city."
+                ),
+            },
+        )
+
+    scan_run_id = f"scan_{uuid4().hex}"
+    provisional_merchant_name = merchant_name_from_url(payload.url)
+    scan_run = start_scan_run(
+        db,
+        scan_run_id=scan_run_id,
+        source_url=payload.url,
+        merchant_name=provisional_merchant_name,
+        target_city_slug=target_city_slug,
+        normalized_category=payload.category_id,
+        requested_image_mode="fast",
+        requested_limit=1,
+        city_mode=payload.city_mode.value,
+    )
+    update_scan_run_context(
+        db,
+        scan_run,
+        merchant_name=provisional_merchant_name,
+        scanner_name="single_product_page",
+        source="single_product",
+        source_type="single_product",
+        merchant_verification="unverified",
+        effective_image_mode="fast",
+    )
+    try:
+        result = import_single_product_candidate(
+            db,
+            url=payload.url,
+            city_mode=payload.city_mode,
+            target_city_slug=target_city_slug,
+            category_override=payload.category_id,
+            active_city_slugs=active_city_slugs,
+            scan_run_id=scan_run_id,
+            concept_overrides=load_runtime_concept_overrides(db),
+            scoring_mode=get_curation_scoring_configuration(db).scoring_mode,
+        )
+        update_scan_run_context(
+            db,
+            scan_run,
+            merchant_name=result["merchant_name"],
+            scanner_name="single_product_page",
+            source="single_product",
+            source_type="single_product",
+            merchant_verification=(
+                result["candidate"].get("merchant_verification")
+                or "unverified"
+            ),
+            effective_image_mode="fast",
+        )
+        try:
+            concept_review = record_unknown_concepts_for_scan(db, scan_run_id)
+        except Exception:
+            db.rollback()
+            logger.exception(
+                "Concept proposal indexing failed for single product %s",
+                scan_run_id,
+            )
+            concept_review = {
+                "detected": 0,
+                "created": 0,
+                "updated": 0,
+                "skipped": 1,
+            }
+            result["warnings"].append(
+                "The product was saved, but concept-review indexing was skipped "
+                "because of a temporary database conflict."
+            )
+        result["concept_review"] = concept_review
+        if isinstance(result.get("summary"), dict):
+            result["summary"]["concept_review"] = concept_review
+        complete_scan_run(
+            db,
+            scan_run,
+            result=result,
+            warnings=result.get("warnings") or [],
+        )
+        return result
+    except ProductUrlValidationError as exc:
+        fail_scan_run(
+            db,
+            scan_run_id,
+            error_message=str(exc),
+            failure_type="invalid_single_product_url",
+            attempts=list(exc.attempts),
+        )
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "type": "invalid_single_product_url",
+                "message": str(exc),
+                "suggestion": (
+                    "Paste a public retailer product-detail URL beginning with "
+                    "https://."
+                ),
+            },
+        ) from exc
+    except NotProductPageError as exc:
+        fail_scan_run(
+            db,
+            scan_run_id,
+            error_message=str(exc),
+            failure_type="not_a_product_page",
+            attempts=list(exc.attempts),
+        )
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "type": "not_a_product_page",
+                "message": str(exc),
+                "attempts": list(exc.attempts),
+                "suggestion": (
+                    "Open the exact item page—not a collection, category, search, "
+                    "or store homepage—and try that URL."
+                ),
+            },
+        ) from exc
+    except ProductPageFetchError as exc:
+        fail_scan_run(
+            db,
+            scan_run_id,
+            error_message=str(exc),
+            failure_type="single_product_fetch_failed",
+            attempts=list(exc.attempts),
+        )
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "type": "single_product_fetch_failed",
+                "message": str(exc),
+                "attempts": list(exc.attempts),
+                "suggestion": (
+                    "Confirm that the exact product page is public. Some retailers "
+                    "block automated page access."
+                ),
+            },
+        ) from exc
+    except ValueError as exc:
+        fail_scan_run(
+            db,
+            scan_run_id,
+            error_message=str(exc),
+            failure_type="invalid_single_product_import",
+        )
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "type": "invalid_single_product_import",
+                "message": str(exc),
+                "suggestion": (
+                    "Check the product URL, category override, and city override."
+                ),
+            },
+        ) from exc
+    except Exception as exc:
+        logger.exception("Single-product import %s failed", scan_run_id)
+        fail_scan_run(
+            db,
+            scan_run_id,
+            error_message=type(exc).__name__,
+            failure_type="single_product_import_failed",
+        )
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "type": "single_product_import_failed",
+                "message": (
+                    "Single-product analysis failed during an internal processing "
+                    "step. No database details were exposed."
+                ),
+            },
+        ) from exc
 
 
 @router.post("/collection-scan")

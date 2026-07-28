@@ -81,6 +81,10 @@ class CollectionScanOptions:
     merchant_profile_allowed: bool = False
     concept_overrides: tuple[dict[str, Any], ...] = ()
     scoring_mode: str = LEGACY_SCORING_MODE
+    score_all_active_cities: bool = False
+    force_strict_distinctiveness: bool = False
+    category_override: bool = False
+    preserve_unknown_availability: bool = False
 
 
 @dataclass(frozen=True)
@@ -189,6 +193,12 @@ class ShopifyBuildResult:
     discovery_attempts: tuple[dict[str, str], ...] = ()
 
 
+@dataclass(frozen=True)
+class ProductCandidateBuildResult:
+    payload: CandidatePayload
+    image_candidates_checked: int
+
+
 def score_candidate_for_scan(
     *,
     options: CollectionScanOptions,
@@ -203,7 +213,9 @@ def score_candidate_for_scan(
     """Extract garment evidence once, score active cities, and assign if safe."""
     mode = normalize_city_scan_mode(options.city_mode)
     active_city_slugs = (
-        options.active_city_slugs if mode == CityScanMode.AUTO else ()
+        options.active_city_slugs
+        if mode == CityScanMode.AUTO or options.score_all_active_cities
+        else ()
     )
     score = score_city_fit(
         title=title,
@@ -220,7 +232,7 @@ def score_candidate_for_scan(
         concept_overrides=options.concept_overrides,
         scoring_mode=(
             STRICT_DISTINCTIVENESS_SCORING_MODE
-            if mode == CityScanMode.AUTO
+            if mode == CityScanMode.AUTO or options.force_strict_distinctiveness
             else options.scoring_mode
         ),
         manual_observed_garment_details=manual_observed_garment_details,
@@ -733,16 +745,24 @@ def _build_candidate_draft(
         "USD" if "/en-us/" in clean_source_url else None
     )
     availability = (
-        "in_stock"
-        if any(v.get("available") is True for v in variants)
-        else "out_of_stock"
+        None
+        if options.preserve_unknown_availability and not variants
+        else (
+            "in_stock"
+            if any(v.get("available") is True for v in variants)
+            else "out_of_stock"
+        )
     )
 
     description = _strip_html(product.get("body_html"))
     product_type = product.get("product_type")
     raw_tags = product.get("tags") or []
     tags = raw_tags if isinstance(raw_tags, list) else []
-    normalized_category = _normalize_category(title, product_type, options.normalized_category)
+    normalized_category = (
+        options.normalized_category
+        if options.category_override and options.normalized_category
+        else _normalize_category(title, product_type, options.normalized_category)
+    )
     merchant_url = product.get("_merchant_url") or _build_product_url(
         clean_source_url,
         handle,
@@ -949,6 +969,92 @@ def build_candidate_payload_result(options: CollectionScanOptions) -> ShopifyBui
         discovery_method=fetch_result.discovery_method,
         fallback_used=fetch_result.fallback_used,
         discovery_attempts=fetch_result.discovery_attempts,
+    )
+
+
+def build_candidate_payload_from_product(
+    product: dict[str, Any],
+    *,
+    options: CollectionScanOptions,
+    source_url: str,
+    verify_image: bool = True,
+) -> ProductCandidateBuildResult:
+    """Build one queue-ready candidate with the collection scanner's rules.
+
+    Single-product imports use this public adapter so category normalization,
+    eligibility, platform alignment, city scoring, and strict-distinctiveness
+    metadata stay identical to collection-scan candidates.
+    """
+    draft = _build_candidate_draft(
+        product,
+        options=options,
+        clean_source_url=source_url,
+    )
+    if draft is None:
+        raise ValueError(
+            "The product page did not expose a usable title and stable product identifier."
+        )
+
+    if verify_image:
+        selection = select_shopify_product_image(
+            draft.image_candidates,
+            image_mode=options.image_mode,
+            referer=source_url,
+            timeout_seconds=options.request_timeout_seconds,
+            cache=ShopifyImageSelectionCache(),
+        )
+        image_url = selection.url
+        image_quality_score = selection.score
+        candidates_checked = selection.candidates_checked
+    else:
+        image_url = (
+            draft.image_candidates[0].url
+            if draft.image_candidates
+            else None
+        )
+        image_quality_score = None
+        candidates_checked = 0
+
+    eligibility = evaluate_candidate_eligibility(
+        title=draft.payload.title,
+        affiliate_url=draft.payload.affiliate_url,
+        merchant_url=draft.payload.merchant_url,
+        image_url=image_url,
+        availability=draft.payload.availability,
+        normalized_category=draft.payload.normalized_category,
+        price_amount=draft.payload.price_amount,
+        currency=draft.payload.currency,
+    )
+    platform_alignment = score_platform_alignment(
+        title=draft.payload.title,
+        description=draft.payload.description,
+        product_type=draft.product_type,
+        tags=draft.tags,
+        merchant_name=draft.payload.merchant_name,
+        brand_name=draft.payload.brand_name,
+        merchant_verification=draft.payload.merchant_verification,
+        image_url=image_url,
+        image_quality_score=image_quality_score,
+        normalized_category=draft.payload.normalized_category,
+        city_fit_score=draft.payload.city_fit_score,
+    )
+    return ProductCandidateBuildResult(
+        payload=replace(
+            draft.payload,
+            image_url=image_url,
+            eligibility_status=eligibility.status,
+            eligibility_reasons=eligibility.reasons,
+            platform_alignment_score=platform_alignment.score,
+            platform_alignment_reasons=platform_alignment.reasons,
+            review_notes=(
+                "; ".join(
+                    reason.replace("_", " ")
+                    for reason in eligibility.warning_reasons
+                )
+                or None
+            ),
+        ),
+        image_candidates_checked=candidates_checked,
     )
 
 
