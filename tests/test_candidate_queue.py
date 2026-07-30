@@ -1,10 +1,12 @@
 import unittest
+from datetime import datetime, timezone
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.curation.candidate_queue import (
     CandidateTransitionError,
+    approve_candidate,
     apply_candidate_queue_filter,
     reject_candidate,
     resolve_candidate_queue_status,
@@ -12,6 +14,7 @@ from app.curation.candidate_queue import (
 )
 from app.curation.product_candidate_publisher import (
     publish_approved_product_candidates,
+    publish_product_candidate,
 )
 from app.database import Base
 from app.models import Brand, City, Country, Product, ProductCandidate
@@ -75,11 +78,19 @@ class CandidateQueueTests(unittest.TestCase):
             title=f"Product {external_id}",
             price_amount=79,
             currency="USD",
+            affiliate_url=f"https://tracking.example.com/{external_id}",
             merchant_url=f"https://shop.example.com/products/{external_id}",
+            affiliate_link_status="verified",
+            affiliate_sub_id=f"haroona-product-test-{external_id}",
+            affiliate_link_verified_at=datetime.now(timezone.utc),
+            affiliate_link_verified_by="test-curator",
             image_url=f"https://cdn.example.com/{external_id}.jpg",
             availability="in_stock",
             normalized_category="dress",
             target_city_slug="london",
+            platform_alignment_score=8,
+            city_fit_score=90,
+            city_fit_scores={"london": 90},
             haroona_score=90,
             score_reasons=[],
             review_status=review_status,
@@ -141,6 +152,8 @@ class CandidateQueueTests(unittest.TestCase):
             review_status="approved",
             product_is_active=False,
         )
+        candidate.platform_alignment_score = 6.2
+        self.db.commit()
 
         result = publish_approved_product_candidates(self.db, target_city_slug="london")
 
@@ -149,6 +162,66 @@ class CandidateQueueTests(unittest.TestCase):
         self.assertEqual(result["published"], 1)
         self.assertEqual(result["updated"], 1)
         self.assertTrue(product.is_active)
+
+    def test_unverified_candidate_cannot_be_published(self):
+        candidate = self._candidate("not-verified", review_status="approved")
+        candidate.affiliate_link_status = "ready_to_verify"
+        candidate.affiliate_link_verified_at = None
+        candidate.affiliate_link_verified_by = None
+        self.db.commit()
+
+        with self.assertRaises(ValueError) as raised:
+            publish_product_candidate(self.db, candidate)
+
+        self.assertIn("Open and verify", str(raised.exception))
+        self.assertIsNone(candidate.promoted_product_id)
+
+    def test_publish_keeps_original_and_tracking_urls_separate(self):
+        candidate = self._candidate("separate-links", review_status="approved")
+
+        result = publish_product_candidate(self.db, candidate)
+
+        product = self.db.query(Product).filter(Product.id == result["product_id"]).one()
+        self.assertEqual(
+            product.merchant_url,
+            "https://shop.example.com/products/separate-links",
+        )
+        self.assertEqual(
+            product.affiliate_url,
+            "https://tracking.example.com/separate-links",
+        )
+        self.assertTrue(product.is_affiliate)
+
+    def test_low_platform_advisory_does_not_block_publish(self):
+        candidate = self._candidate("low-platform-publish", review_status="approved")
+        candidate.platform_alignment_score = 6.2
+        self.db.commit()
+
+        result = publish_product_candidate(self.db, candidate)
+
+        product = self.db.query(Product).filter(Product.id == result["product_id"]).one()
+        self.assertTrue(product.is_active)
+        self.assertEqual(float(candidate.platform_alignment_score), 6.2)
+
+    def test_restore_live_requires_verified_affiliate_link(self):
+        candidate = self._candidate(
+            "restore-unverified",
+            review_status="archived",
+            product_is_active=False,
+        )
+        candidate.affiliate_link_status = "failed"
+        candidate.affiliate_url = None
+        self.db.commit()
+
+        with self.assertRaises(CandidateTransitionError) as raised:
+            restore_candidate(
+                self.db,
+                candidate,
+                restored_by="test-curator",
+                restore_to="live",
+            )
+
+        self.assertIn("Retry affiliate-link generation", str(raised.exception))
 
     def test_restore_to_pending_deactivates_a_stale_live_product(self):
         candidate = self._candidate(
@@ -186,6 +259,70 @@ class CandidateQueueTests(unittest.TestCase):
             )
 
         self.assertIn("unpublished", str(raised.exception).lower())
+
+    def test_ineligible_candidate_cannot_be_approved(self):
+        candidate = self._candidate("sold-out", review_status="pending")
+        candidate.availability = "out_of_stock"
+        self.db.commit()
+
+        with self.assertRaises(CandidateTransitionError) as raised:
+            approve_candidate(
+                self.db,
+                candidate,
+                reviewed_by="test-curator",
+            )
+
+        self.assertIn("out_of_stock", str(raised.exception))
+        self.assertEqual(candidate.review_status, "pending")
+        self.assertEqual(candidate.eligibility_status, "ineligible")
+
+    def test_candidate_below_platform_advisory_can_be_approved(self):
+        candidate = self._candidate("low-platform", review_status="pending")
+        candidate.platform_alignment_score = 6.9
+        self.db.commit()
+
+        result = approve_candidate(
+            self.db,
+            candidate,
+            reviewed_by="test-curator",
+        )
+
+        self.assertEqual(result["review_status"], "approved")
+        self.assertEqual(candidate.review_status, "approved")
+        self.assertEqual(float(candidate.platform_alignment_score), 6.9)
+
+    def test_candidate_below_haroona_selection_threshold_cannot_be_approved(self):
+        candidate = self._candidate("low-city-fit", review_status="pending")
+        candidate.city_fit_score = 79
+        candidate.haroona_score = 79
+        self.db.commit()
+
+        with self.assertRaises(CandidateTransitionError) as raised:
+            approve_candidate(
+                self.db,
+                candidate,
+                reviewed_by="test-curator",
+            )
+
+        self.assertIn("79/100 is below the 80/100 threshold", str(raised.exception))
+        self.assertEqual(candidate.review_status, "pending")
+
+    def test_strict_candidate_without_gate_result_must_be_rescored(self):
+        candidate = self._candidate("strict-missing-gate", review_status="pending")
+        candidate.scoring_mode = "strict_distinctiveness"
+        candidate.scoring_version = "strict_distinctiveness_v2"
+        candidate.scoring_analysis = {}
+        self.db.commit()
+
+        with self.assertRaises(CandidateTransitionError) as raised:
+            approve_candidate(
+                self.db,
+                candidate,
+                reviewed_by="test-curator",
+            )
+
+        self.assertIn("result is missing", str(raised.exception))
+        self.assertEqual(candidate.review_status, "pending")
 
 
 if __name__ == "__main__":

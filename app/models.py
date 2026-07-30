@@ -1,4 +1,17 @@
-from sqlalchemy import Column, Integer, BigInteger, String, ForeignKey, UniqueConstraint, Numeric, Boolean, DateTime, Text, JSON
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    CheckConstraint,
+    Column,
+    DateTime,
+    ForeignKey,
+    Integer,
+    JSON,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.database import Base
@@ -313,6 +326,97 @@ class CatalogBrandControl(Base):
         return f"<CatalogBrandControl {self.source}:{self.brand_key}>"
 
 
+class CurationSetting(Base):
+    __tablename__ = "curation_settings"
+
+    key = Column(String(100), primary_key=True)
+    value = Column(JSON, nullable=False)
+    updated_by = Column(String(255), nullable=True)
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    def __repr__(self):
+        return f"<CurationSetting {self.key}>"
+
+
+class Merchant(Base):
+    __tablename__ = "merchants"
+
+    id = Column(String(64), primary_key=True)
+    display_name = Column(String(255), nullable=False, index=True)
+    normalized_name = Column(String(255), nullable=False, unique=True, index=True)
+    canonical_domain = Column(String(255), nullable=False, unique=True, index=True)
+    is_active = Column(Boolean, nullable=False, default=True, index=True)
+    import_batch = Column(String(120), nullable=True, index=True)
+    notes = Column(Text, nullable=True)
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    collections = relationship(
+        "MerchantCollection",
+        back_populates="merchant",
+        cascade="all, delete-orphan",
+    )
+
+    def __repr__(self):
+        return f"<Merchant {self.display_name}>"
+
+
+class MerchantCollection(Base):
+    __tablename__ = "merchant_collections"
+
+    id = Column(String(64), primary_key=True)
+    merchant_id = Column(
+        String(64),
+        ForeignKey("merchants.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    collection_name = Column(String(255), nullable=False, index=True)
+    collection_url = Column(Text, nullable=False)
+    normalized_url = Column(String(2000), nullable=False, unique=True)
+    canonical_category = Column(String(80), nullable=True, index=True)
+    city_slug = Column(String(80), nullable=True, index=True)
+    is_active = Column(Boolean, nullable=False, default=True, index=True)
+    import_batch = Column(String(120), nullable=True, index=True)
+    notes = Column(Text, nullable=True)
+    source_row = Column(Integer, nullable=True)
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    merchant = relationship("Merchant", back_populates="collections")
+
+    def __repr__(self):
+        return f"<MerchantCollection {self.collection_name}>"
+
+
 class ProductCandidate(Base):
     __tablename__ = "product_candidates"
 
@@ -325,6 +429,8 @@ class ProductCandidate(Base):
 
     merchant_name = Column(String(255), nullable=False, index=True)
     brand_name = Column(String(255), nullable=True)
+    merchant_verification = Column(String(20), nullable=False, default="unverified")
+    merchant_profile_key = Column(String(100), nullable=True)
     external_product_id = Column(String(200), nullable=False)
 
     title = Column(String(500), nullable=False)
@@ -335,13 +441,67 @@ class ProductCandidate(Base):
 
     affiliate_url = Column(Text, nullable=True)
     merchant_url = Column(Text, nullable=True)
+    affiliate_link_status = Column(
+        String(30), nullable=False, default="not_generated", index=True
+    )
+    affiliate_provider = Column(String(30), nullable=True)
+    affiliate_provider_reference = Column(Text, nullable=True)
+    affiliate_sub_id = Column(String(120), nullable=True, unique=True)
+    affiliate_link_attempt_count = Column(Integer, nullable=False, default=0)
+    affiliate_link_error_code = Column(String(80), nullable=True)
+    affiliate_link_error_message = Column(Text, nullable=True)
+    affiliate_link_last_attempted_at = Column(DateTime(timezone=True), nullable=True)
+    affiliate_link_generated_at = Column(DateTime(timezone=True), nullable=True)
+    affiliate_link_verified_at = Column(DateTime(timezone=True), nullable=True)
+    affiliate_link_verified_by = Column(String(255), nullable=True)
+    affiliate_link_invalidated_at = Column(DateTime(timezone=True), nullable=True)
+    affiliate_link_invalidated_by = Column(String(255), nullable=True)
     image_url = Column(Text, nullable=True)
     availability = Column(String(50), nullable=True, index=True)
     normalized_category = Column(String(80), nullable=True, index=True)
 
-    target_city_slug = Column(String(80), nullable=False, index=True)
+    city_scan_mode = Column(String(20), nullable=False, default="selected", index=True)
+    target_city_slug = Column(String(80), nullable=True, index=True)
+    recommended_city_slug = Column(String(80), nullable=True, index=True)
+    recommended_city_score = Column(Integer, nullable=True)
+    runner_up_city_slug = Column(String(80), nullable=True)
+    runner_up_city_score = Column(Integer, nullable=True)
+    city_score_margin = Column(Integer, nullable=True)
+    city_assignment_status = Column(
+        String(40),
+        nullable=False,
+        default="manually_assigned",
+        index=True,
+    )
+    city_assignment_source = Column(
+        String(40),
+        nullable=False,
+        default="legacy",
+    )
+    city_candidates = Column(JSON, nullable=False, default=list)
+    manual_city_override = Column(Boolean, nullable=False, default=False)
+    city_assigned_at = Column(DateTime(timezone=True), nullable=True)
+    city_assigned_by = Column(String(255), nullable=True)
     city_connection_type = Column(String(40), nullable=True)
     city_connection_note = Column(String(255), nullable=True)
+
+    eligibility_status = Column(
+        String(20), nullable=False, default="needs_review", index=True
+    )
+    eligibility_reasons = Column(JSON, nullable=False, default=list)
+    platform_alignment_score = Column(Numeric(3, 1), nullable=True)
+    platform_alignment_reasons = Column(JSON, nullable=False, default=list)
+    city_fit_score = Column(Integer, nullable=False, default=0, index=True)
+    city_fit_scores = Column(JSON, nullable=False, default=dict)
+    secondary_city_slug = Column(String(80), nullable=True, index=True)
+    scoring_confidence = Column(Integer, nullable=True)
+    scoring_method = Column(
+        String(40), nullable=False, default="deterministic_rules"
+    )
+    scoring_version = Column(String(40), nullable=False, default="rules_v1")
+    scoring_mode = Column(String(40), nullable=False, default="legacy")
+    scoring_analysis = Column(JSON, nullable=False, default=dict)
+    manual_observed_garment_details = Column(JSON, nullable=False, default=list)
 
     haroona_score = Column(Integer, nullable=False, default=0, index=True)
     score_reasons = Column(JSON, nullable=False, default=list)
@@ -364,6 +524,13 @@ class ProductCandidate(Base):
 
     __table_args__ = (
         UniqueConstraint("source", "external_product_id", name="uq_product_candidates_source_external"),
+        CheckConstraint(
+            "affiliate_link_status IN ("
+            "'not_generated', 'generating', 'ready_to_verify', 'verified', "
+            "'no_eligible_offer', 'failed', 'invalid'"
+            ")",
+            name="ck_product_candidates_affiliate_link_status",
+        ),
     )
 
     def __repr__(self):
@@ -378,8 +545,15 @@ class CurationScanRun(Base):
 
     source_url = Column(Text, nullable=False)
     source_host = Column(String(255), nullable=True, index=True)
+    collection_id = Column(
+        String(64),
+        ForeignKey("merchant_collections.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     merchant_name = Column(String(255), nullable=False, index=True)
-    target_city_slug = Column(String(80), nullable=False, index=True)
+    city_mode = Column(String(20), nullable=False, default="selected", index=True)
+    target_city_slug = Column(String(80), nullable=True, index=True)
     normalized_category = Column(String(80), nullable=True)
 
     scanner_name = Column(String(80), nullable=True)
@@ -410,6 +584,55 @@ class CurationScanRun(Base):
 
     def __repr__(self):
         return f"<CurationScanRun {self.id} status={self.status}>"
+
+
+class FashionConcept(Base):
+    __tablename__ = "fashion_concepts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    concept_id = Column(String(120), nullable=False, unique=True, index=True)
+    label = Column(String(255), nullable=False)
+    category = Column(String(80), nullable=False, index=True)
+    traits = Column(JSON, nullable=False, default=list)
+    active = Column(Boolean, nullable=False, default=True, index=True)
+    created_by = Column(String(255), nullable=False, default="curator-studio")
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+class FashionConceptAlias(Base):
+    __tablename__ = "fashion_concept_aliases"
+
+    id = Column(Integer, primary_key=True, index=True)
+    normalized_phrase = Column(String(255), nullable=False, unique=True, index=True)
+    display_phrase = Column(String(255), nullable=False)
+    concept_id = Column(String(120), nullable=False, index=True)
+    source = Column(String(40), nullable=False, default="proposal_review")
+    active = Column(Boolean, nullable=False, default=True, index=True)
+    created_by = Column(String(255), nullable=False, default="curator-studio")
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class FashionConceptProposal(Base):
+    __tablename__ = "fashion_concept_proposals"
+
+    id = Column(Integer, primary_key=True, index=True)
+    normalized_phrase = Column(String(255), nullable=False, unique=True, index=True)
+    display_phrase = Column(String(255), nullable=False)
+    status = Column(String(20), nullable=False, default="pending", index=True)
+    occurrence_count = Column(Integer, nullable=False, default=0)
+    examples = Column(JSON, nullable=False, default=list)
+    candidate_keys = Column(JSON, nullable=False, default=list)
+    resolved_concept_id = Column(String(120), nullable=True, index=True)
+    reviewed_by = Column(String(255), nullable=True)
+    reviewed_at = Column(DateTime(timezone=True), nullable=True)
+    first_seen_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    last_seen_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
 class CurationScanRunCandidate(Base):

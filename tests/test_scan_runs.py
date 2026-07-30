@@ -130,11 +130,24 @@ class ScanRunTests(unittest.TestCase):
             self.db,
             run.id,
             error_message="Collection endpoint returned 404",
+            failure_type="collection_discovery_failed",
+            attempts=[
+                {
+                    "method": "shopify_collection_json",
+                    "status": "failed",
+                    "detail": "Collection endpoint returned 404",
+                }
+            ],
         )
 
         self.db.refresh(run)
         self.assertEqual(run.status, "failed")
         self.assertEqual(run.error_message, "Collection endpoint returned 404")
+        self.assertEqual(run.summary["failure_type"], "collection_discovery_failed")
+        self.assertEqual(
+            run.summary["discovery"]["attempts"][0]["method"],
+            "shopify_collection_json",
+        )
         self.assertIsNotNone(run.completed_at)
 
     def test_scanned_stores_group_www_aliases_and_keep_latest_details(self):

@@ -5,6 +5,12 @@ from datetime import datetime, timezone
 from sqlalchemy import exists
 from sqlalchemy.orm import Query, Session
 
+from app.curation.affiliate_links import require_publishable_affiliate_link
+from app.curation.eligibility import INELIGIBLE, evaluate_candidate_eligibility
+from app.curation.scoring import (
+    HAROONA_SELECTION_THRESHOLD,
+    STRICT_DISTINCTIVENESS_SCORING_MODE,
+)
 from app.models import Product, ProductCandidate
 
 
@@ -97,6 +103,80 @@ def _require_pending_review_transition(
         )
 
 
+def _refresh_candidate_eligibility(candidate: ProductCandidate):
+    result = evaluate_candidate_eligibility(
+        title=candidate.title,
+        affiliate_url=candidate.affiliate_url,
+        merchant_url=candidate.merchant_url,
+        image_url=candidate.image_url,
+        availability=candidate.availability,
+        normalized_category=candidate.normalized_category,
+        price_amount=candidate.price_amount,
+        currency=candidate.currency,
+    )
+    candidate.eligibility_status = result.status
+    candidate.eligibility_reasons = result.reasons
+    return result
+
+
+def haroona_selection_failure(candidate: ProductCandidate) -> str | None:
+    """Return the editorial reason a candidate cannot move toward discovery.
+
+    Platform alignment remains visible curator context, but it is intentionally
+    not part of this gate. Haroona selection is driven by the city rubric,
+    required product data, and the curator's explicit decision.
+    """
+    if not str(candidate.target_city_slug or "").strip():
+        return "A final city must be assigned before approval"
+
+    selection_score = int(candidate.haroona_score or 0)
+    if selection_score < HAROONA_SELECTION_THRESHOLD:
+        return (
+            f"Haroona selection score {selection_score}/100 is below the "
+            f"{HAROONA_SELECTION_THRESHOLD}/100 threshold"
+        )
+
+    analysis = (
+        candidate.scoring_analysis
+        if isinstance(candidate.scoring_analysis, dict)
+        else {}
+    )
+    is_strict = (
+        candidate.scoring_mode == STRICT_DISTINCTIVENESS_SCORING_MODE
+        or str(candidate.scoring_version or "").startswith(
+            STRICT_DISTINCTIVENESS_SCORING_MODE
+        )
+    )
+    if is_strict:
+        primary_match_eligible = analysis.get("primary_match_eligible")
+        if primary_match_eligible is False:
+            reasons = [
+                str(reason).replace("_", " ")
+                for reason in (analysis.get("gate_failure_reasons") or [])
+                if str(reason).strip()
+            ]
+            detail = f": {', '.join(reasons)}" if reasons else ""
+            return f"Strict city-distinctiveness gate did not pass{detail}"
+        if primary_match_eligible is not True:
+            return (
+                "Strict city-distinctiveness result is missing; rescore the "
+                "candidate before approval"
+            )
+
+    return None
+
+
+def _require_haroona_selection(
+    candidate: ProductCandidate,
+    action: str,
+) -> None:
+    failure = haroona_selection_failure(candidate)
+    if failure:
+        raise CandidateTransitionError(
+            f"Candidate cannot be {action}: {failure}"
+        )
+
+
 def approve_candidate(
     db: Session,
     candidate: ProductCandidate,
@@ -104,6 +184,13 @@ def approve_candidate(
     reviewed_by: str,
 ) -> dict:
     _require_pending_review_transition(db, candidate, "approved")
+    eligibility = _refresh_candidate_eligibility(candidate)
+    if eligibility.status == INELIGIBLE:
+        reasons = ", ".join(eligibility.blocking_reasons)
+        raise CandidateTransitionError(
+            f"Candidate is not eligible for approval: {reasons}"
+        )
+    _require_haroona_selection(candidate, "approved")
     candidate.review_status = "approved"
     candidate.reviewed_by = reviewed_by
     candidate.reviewed_at = datetime.now(timezone.utc)
@@ -198,6 +285,17 @@ def restore_candidate(
     product_was_reactivated = False
 
     if normalized_target == "live":
+        try:
+            require_publishable_affiliate_link(candidate)
+        except ValueError as exc:
+            raise CandidateTransitionError(str(exc)) from exc
+        eligibility = _refresh_candidate_eligibility(candidate)
+        if eligibility.status == INELIGIBLE:
+            reasons = ", ".join(eligibility.blocking_reasons)
+            raise CandidateTransitionError(
+                f"Candidate is not eligible to restore live: {reasons}"
+            )
+        _require_haroona_selection(candidate, "restored live")
         if not restored_product_id or not product:
             raise CandidateTransitionError(
                 "Only previously published candidates can be restored live"

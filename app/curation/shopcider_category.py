@@ -19,15 +19,19 @@ except ImportError:  # pragma: no cover - optional image-quality scoring depende
     Image = None
     ImageStat = None
 
-from app.curation.scoring import score_city_fit
+from app.curation.eligibility import add_reason_counts, evaluate_candidate_eligibility
+from app.curation.platform_alignment import score_platform_alignment
 from app.curation.shopify_collection import (
     USER_AGENT,
     CandidatePayload,
     CollectionScanOptions,
+    _candidate_item_payload,
     build_scan_summary,
+    candidate_review_rank,
     _normalize_category,
     _parse_decimal,
     _strip_html,
+    score_candidate_for_scan,
     upsert_product_candidates,
 )
 
@@ -57,6 +61,8 @@ class ShopCiderBuildResult:
     payloads: list[CandidatePayload]
     discovered_count: int
     skipped_invalid_products: int
+    skipped_ineligible_products: int
+    ineligible_reason_counts: dict[str, int]
     skipped_missing_images: int
     skipped_due_to_limit: int
 
@@ -1080,6 +1086,8 @@ def build_shopcider_candidate_payload_result(options: CollectionScanOptions) -> 
     payloads: list[CandidatePayload] = []
     clean_source_url = _clean_source_url(options.source_url)
     skipped_invalid_products = 0
+    skipped_ineligible_products = 0
+    ineligible_reason_counts: dict[str, int] = {}
     skipped_missing_images = 0
 
     image_mode = _normalize_image_mode(options.image_mode)
@@ -1096,15 +1104,34 @@ def build_shopcider_candidate_payload_result(options: CollectionScanOptions) -> 
         product_type = product.get("product_type")
         tags = product.get("tags") if isinstance(product.get("tags"), list) else []
         normalized_category = _normalize_category(title, product_type, options.normalized_category)
+        merchant_url = product.get("merchant_url")
+        availability = product.get("availability") or "unknown"
+        price_amount = product.get("price_amount")
+        currency = product.get("currency") or "USD"
+        eligibility = evaluate_candidate_eligibility(
+            title=title,
+            affiliate_url=None,
+            merchant_url=merchant_url,
+            image_url=None,
+            availability=availability,
+            normalized_category=normalized_category,
+            price_amount=price_amount,
+            currency=currency,
+            require_image=False,
+        )
+        if not eligibility.is_eligible:
+            skipped_ineligible_products += 1
+            add_reason_counts(ineligible_reason_counts, eligibility.blocking_reasons)
+            continue
 
-        score = score_city_fit(
+        score, assignment = score_candidate_for_scan(
+            options=options,
             title=title,
             description=description,
             product_type=product_type,
             tags=tags,
-            target_city_slug=options.target_city_slug,
             normalized_category=normalized_category,
-            merchant_name=options.merchant_name,
+            brand_name=product.get("brand_name") or options.merchant_name,
         )
 
         image_candidates = _image_candidates_for_product(
@@ -1138,13 +1165,29 @@ def build_shopcider_candidate_payload_result(options: CollectionScanOptions) -> 
             skipped_missing_images += 1
             continue
 
-        review_notes: list[str] = []
-        if product.get("price_amount") is None:
-            review_notes.append("missing price")
-        if product.get("availability") != "in_stock":
-            review_notes.append("not in stock")
-        if not normalized_category:
-            review_notes.append("unknown category")
+        final_eligibility = evaluate_candidate_eligibility(
+            title=title,
+            affiliate_url=None,
+            merchant_url=merchant_url,
+            image_url=image_url,
+            availability=availability,
+            normalized_category=normalized_category,
+            price_amount=price_amount,
+            currency=currency,
+        )
+        platform_alignment = score_platform_alignment(
+            title=title,
+            description=description,
+            product_type=product_type,
+            tags=tags,
+            merchant_name=options.merchant_name,
+            brand_name=product.get("brand_name") or options.merchant_name,
+            merchant_verification=options.merchant_verification,
+            image_url=image_url,
+            image_quality_score=None,
+            normalized_category=normalized_category,
+            city_fit_score=score.score,
+        )
 
         payloads.append(
             CandidatePayload(
@@ -1157,29 +1200,69 @@ def build_shopcider_candidate_payload_result(options: CollectionScanOptions) -> 
                 external_product_id=external_id,
                 title=title,
                 description=description,
-                price_amount=product.get("price_amount"),
-                currency=product.get("currency") or "USD",
+                price_amount=price_amount,
+                currency=currency,
                 affiliate_url=None,
-                merchant_url=product.get("merchant_url"),
+                merchant_url=merchant_url,
                 image_url=image_url,
-                availability=product.get("availability") or "in_stock",
+                availability=availability,
                 normalized_category=normalized_category,
-                target_city_slug=options.target_city_slug,
+                target_city_slug=assignment.final_city_slug,
                 city_connection_type=score.city_connection_type,
                 city_connection_note=score.city_connection_note,
-                haroona_score=score.score,
+                merchant_verification=options.merchant_verification,
+                merchant_profile_key=score.merchant_profile_key,
+                eligibility_status=final_eligibility.status,
+                eligibility_reasons=final_eligibility.reasons,
+                platform_alignment_score=platform_alignment.score,
+                platform_alignment_reasons=platform_alignment.reasons,
+                city_fit_score=(
+                    score.city_fit_percentage
+                    if score.city_fit_percentage is not None
+                    else score.score
+                ),
+                city_fit_scores=score.city_fit_scores or {
+                    assignment.recommended_city_slug: score.score
+                },
+                secondary_city_slug=score.secondary_city_slug,
+                scoring_confidence=score.confidence,
+                scoring_method="deterministic_rules",
+                scoring_version=score.scoring_version,
+                haroona_score=(
+                    score.raw_total if score.raw_total is not None else score.score
+                ),
                 score_reasons=score.reasons,
-                review_notes="; ".join(review_notes) or None,
+                review_notes=(
+                    "; ".join(
+                        reason.replace("_", " ")
+                        for reason in final_eligibility.warning_reasons
+                    )
+                    or None
+                ),
+                scoring_mode=score.scoring_mode,
+                scoring_analysis=score.analysis_payload(),
+                city_scan_mode=assignment.city_scan_mode,
+                recommended_city_slug=assignment.recommended_city_slug,
+                recommended_city_score=assignment.recommended_city_score,
+                runner_up_city_slug=assignment.runner_up_city_slug,
+                runner_up_city_score=assignment.runner_up_city_score,
+                city_score_margin=assignment.city_score_margin,
+                city_assignment_status=assignment.city_assignment_status,
+                city_assignment_source=assignment.city_assignment_source,
+                city_candidates=assignment.city_candidates,
+                manual_city_override=assignment.manual_city_override,
             )
         )
 
-    payloads.sort(key=lambda item: item.haroona_score, reverse=True)
+    payloads.sort(key=candidate_review_rank, reverse=True)
     limited_payloads = payloads[: options.limit]
 
     return ShopCiderBuildResult(
         payloads=limited_payloads,
         discovered_count=len(products),
         skipped_invalid_products=skipped_invalid_products,
+        skipped_ineligible_products=skipped_ineligible_products,
+        ineligible_reason_counts=ineligible_reason_counts,
         skipped_missing_images=skipped_missing_images,
         skipped_due_to_limit=max(len(payloads) - len(limited_payloads), 0),
     )
@@ -1202,6 +1285,8 @@ def scan_and_save_shopcider_category(db: Session, options: CollectionScanOptions
         skipped_duplicates=counts["skipped_duplicates"],
         skipped_missing_images=build_result.skipped_missing_images,
         skipped_invalid_products=build_result.skipped_invalid_products,
+        skipped_ineligible_products=build_result.skipped_ineligible_products,
+        ineligible_reason_counts=build_result.ineligible_reason_counts,
         skipped_due_to_limit=build_result.skipped_due_to_limit,
         image_mode=_normalize_image_mode(options.image_mode),
     )
@@ -1210,27 +1295,15 @@ def scan_and_save_shopcider_category(db: Session, options: CollectionScanOptions
         "source_url": _clean_source_url(options.source_url),
         "scan_run_id": options.scan_run_id,
         "merchant_name": options.merchant_name,
+        "city_mode": options.city_mode,
         "target_city_slug": options.target_city_slug,
+        "scoring_mode": options.scoring_mode,
+        "scoring_version": (
+            payloads[0].scoring_version if payloads else None
+        ),
         "image_mode": _normalize_image_mode(options.image_mode),
         "found": len(payloads),
         **counts,
         "summary": summary,
-        "items": [
-            {
-                "external_product_id": item.external_product_id,
-                "title": item.title,
-                "price_amount": str(item.price_amount) if item.price_amount is not None else None,
-                "currency": item.currency,
-                "merchant_url": item.merchant_url,
-                "image_url": item.image_url,
-                "availability": item.availability,
-                "normalized_category": item.normalized_category,
-                "city_connection_type": item.city_connection_type,
-                "city_connection_note": item.city_connection_note,
-                "haroona_score": item.haroona_score,
-                "score_reasons": item.score_reasons,
-                "review_notes": item.review_notes,
-            }
-            for item in payloads
-        ],
+        "items": [_candidate_item_payload(item) for item in payloads],
     }

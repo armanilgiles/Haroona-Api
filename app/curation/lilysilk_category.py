@@ -11,13 +11,21 @@ from urllib.parse import urlparse, urlunparse
 import requests
 from sqlalchemy.orm import Session
 
-from app.curation.scoring import score_city_fit
+from app.curation.eligibility import (
+    add_reason_counts,
+    blocking_reasons_only,
+    evaluate_candidate_eligibility,
+)
+from app.curation.platform_alignment import score_platform_alignment
 from app.curation.shopify_collection import (
     USER_AGENT,
     CandidatePayload,
     CollectionScanOptions,
+    _candidate_item_payload,
     _normalize_category,
     build_scan_summary,
+    candidate_review_rank,
+    score_candidate_for_scan,
     upsert_product_candidates,
 )
 from app.curation.shopify_image_selection import (
@@ -64,6 +72,8 @@ class LilySilkFetchResult:
 class LilySilkCandidateDraft:
     payload: CandidatePayload
     image_candidates: list[ShopifyImageCandidate]
+    product_type: str | None
+    tags: list[str]
 
 
 @dataclass(frozen=True)
@@ -71,6 +81,8 @@ class LilySilkBuildResult:
     payloads: list[CandidatePayload]
     discovered_count: int
     skipped_invalid_products: int
+    skipped_ineligible_products: int
+    ineligible_reason_counts: dict[str, int]
     skipped_missing_images: int
     skipped_due_to_limit: int
     pages_scanned: int
@@ -467,14 +479,15 @@ def _build_candidate_draft(
         options.normalized_category,
     )
     description = str(product.get("description") or "").strip() or None
-    score = score_city_fit(
+    brand_name = str(product.get("brand_name") or "").strip() or options.merchant_name
+    score, assignment = score_candidate_for_scan(
+        options=options,
         title=title,
         description=description,
         product_type=product_type,
         tags=tags,
-        target_city_slug=options.target_city_slug,
         normalized_category=normalized_category,
-        merchant_name=options.merchant_name,
+        brand_name=brand_name,
     )
     price_amount, currency = _price_from_product(product)
     schema_availability = str(product.get("schema_availability") or "").lower()
@@ -484,13 +497,33 @@ def _build_candidate_draft(
         else "unknown"
     )
 
-    review_notes: list[str] = []
-    if price_amount is None:
-        review_notes.append("missing price")
-    if availability != "in_stock":
-        review_notes.append("availability unverified")
-    if not normalized_category:
-        review_notes.append("unknown category")
+    merchant_url = _product_url(product, source_url, store_code)
+    eligibility = evaluate_candidate_eligibility(
+        title=title,
+        affiliate_url=None,
+        merchant_url=merchant_url,
+        image_url=None,
+        availability=availability,
+        normalized_category=normalized_category,
+        price_amount=price_amount,
+        currency=currency,
+        require_image=False,
+    )
+
+    image_candidates = _image_candidates(product, title)
+    preliminary_platform_alignment = score_platform_alignment(
+        title=title,
+        description=description,
+        product_type=product_type,
+        tags=tags,
+        merchant_name=options.merchant_name,
+        brand_name=brand_name,
+        merchant_verification=options.merchant_verification,
+        image_url=image_candidates[0].url if image_candidates else None,
+        image_quality_score=None,
+        normalized_category=normalized_category,
+        city_fit_score=score.score,
+    )
 
     return LilySilkCandidateDraft(
         payload=CandidatePayload(
@@ -499,27 +532,60 @@ def _build_candidate_draft(
             source_url=source_url,
             scan_run_id=options.scan_run_id,
             merchant_name=options.merchant_name,
-            brand_name=(
-                str(product.get("brand_name") or "").strip() or options.merchant_name
-            ),
+            brand_name=brand_name,
             external_product_id=external_id,
             title=title,
             description=description,
             price_amount=price_amount,
             currency=currency,
             affiliate_url=None,
-            merchant_url=_product_url(product, source_url, store_code),
+            merchant_url=merchant_url,
             image_url=None,
             availability=availability,
             normalized_category=normalized_category,
-            target_city_slug=options.target_city_slug,
+            target_city_slug=assignment.final_city_slug,
             city_connection_type=score.city_connection_type,
             city_connection_note=score.city_connection_note,
-            haroona_score=score.score,
+            merchant_verification=options.merchant_verification,
+            merchant_profile_key=score.merchant_profile_key,
+            eligibility_status=eligibility.status,
+            eligibility_reasons=eligibility.reasons,
+            platform_alignment_score=preliminary_platform_alignment.score,
+            platform_alignment_reasons=preliminary_platform_alignment.reasons,
+            city_fit_score=(
+                score.city_fit_percentage
+                if score.city_fit_percentage is not None
+                else score.score
+            ),
+            city_fit_scores=score.city_fit_scores or {
+                assignment.recommended_city_slug: score.score
+            },
+            secondary_city_slug=score.secondary_city_slug,
+            scoring_confidence=score.confidence,
+            scoring_method="deterministic_rules",
+            scoring_version=score.scoring_version,
+            haroona_score=score.raw_total if score.raw_total is not None else score.score,
             score_reasons=score.reasons,
-            review_notes="; ".join(review_notes) or None,
+            review_notes=(
+                "; ".join(reason.replace("_", " ") for reason in eligibility.warning_reasons)
+                or None
+            ),
+            scoring_mode=score.scoring_mode,
+            scoring_analysis=score.analysis_payload(),
+            city_scan_mode=assignment.city_scan_mode,
+            recommended_city_slug=assignment.recommended_city_slug,
+            recommended_city_score=assignment.recommended_city_score,
+            runner_up_city_slug=assignment.runner_up_city_slug,
+            runner_up_city_score=assignment.runner_up_city_score,
+            city_score_margin=assignment.city_score_margin,
+            city_assignment_status=assignment.city_assignment_status,
+            city_assignment_source=assignment.city_assignment_source,
+            city_candidates=assignment.city_candidates,
+            manual_city_override=assignment.manual_city_override,
         ),
-        image_candidates=_image_candidates(product, title),
+        image_candidates=image_candidates,
+        product_type=product_type,
+        tags=tags,
     )
 
 
@@ -531,6 +597,8 @@ def build_lilysilk_candidate_payload_result(
     store_code = _store_code_from_url(source_url)
     drafts: list[LilySilkCandidateDraft] = []
     skipped_invalid_products = 0
+    skipped_ineligible_products = 0
+    ineligible_reason_counts: dict[str, int] = {}
 
     for product in fetch_result.products:
         draft = _build_candidate_draft(
@@ -542,9 +610,16 @@ def build_lilysilk_candidate_payload_result(
         if draft is None:
             skipped_invalid_products += 1
             continue
+        if draft.payload.eligibility_status == "ineligible":
+            skipped_ineligible_products += 1
+            add_reason_counts(
+                ineligible_reason_counts,
+                blocking_reasons_only(draft.payload.eligibility_reasons),
+            )
+            continue
         drafts.append(draft)
 
-    drafts.sort(key=lambda item: item.payload.haroona_score, reverse=True)
+    drafts.sort(key=lambda item: candidate_review_rank(item.payload), reverse=True)
     payloads: list[CandidatePayload] = []
     skipped_missing_images = 0
     image_candidates_checked = 0
@@ -565,13 +640,47 @@ def build_lilysilk_candidate_payload_result(
         if not selection.url:
             skipped_missing_images += 1
             continue
-        payloads.append(replace(draft.payload, image_url=selection.url))
+        eligibility = evaluate_candidate_eligibility(
+            title=draft.payload.title,
+            affiliate_url=draft.payload.affiliate_url,
+            merchant_url=draft.payload.merchant_url,
+            image_url=selection.url,
+            availability=draft.payload.availability,
+            normalized_category=draft.payload.normalized_category,
+            price_amount=draft.payload.price_amount,
+            currency=draft.payload.currency,
+        )
+        platform_alignment = score_platform_alignment(
+            title=draft.payload.title,
+            description=draft.payload.description,
+            product_type=draft.product_type,
+            tags=draft.tags,
+            merchant_name=draft.payload.merchant_name,
+            brand_name=draft.payload.brand_name,
+            merchant_verification=draft.payload.merchant_verification,
+            image_url=selection.url,
+            image_quality_score=selection.score,
+            normalized_category=draft.payload.normalized_category,
+            city_fit_score=draft.payload.city_fit_score,
+        )
+        payloads.append(
+            replace(
+                draft.payload,
+                image_url=selection.url,
+                eligibility_status=eligibility.status,
+                eligibility_reasons=eligibility.reasons,
+                platform_alignment_score=platform_alignment.score,
+                platform_alignment_reasons=platform_alignment.reasons,
+            )
+        )
 
     reviewed_draft_count = len(payloads) + skipped_missing_images
     return LilySilkBuildResult(
         payloads=payloads,
         discovered_count=len(fetch_result.products),
         skipped_invalid_products=skipped_invalid_products,
+        skipped_ineligible_products=skipped_ineligible_products,
+        ineligible_reason_counts=ineligible_reason_counts,
         skipped_missing_images=skipped_missing_images,
         skipped_due_to_limit=max(len(drafts) - reviewed_draft_count, 0),
         pages_scanned=fetch_result.pages_scanned,
@@ -604,6 +713,8 @@ def scan_and_save_lilysilk_category(
         skipped_duplicates=counts["skipped_duplicates"],
         skipped_missing_images=build_result.skipped_missing_images,
         skipped_invalid_products=build_result.skipped_invalid_products,
+        skipped_ineligible_products=build_result.skipped_ineligible_products,
+        ineligible_reason_counts=build_result.ineligible_reason_counts,
         skipped_due_to_limit=build_result.skipped_due_to_limit,
         image_mode=image_mode,
         pages_scanned=build_result.pages_scanned,
@@ -615,30 +726,16 @@ def scan_and_save_lilysilk_category(
         "source_url": _clean_source_url(options.source_url),
         "scan_run_id": options.scan_run_id,
         "merchant_name": options.merchant_name,
+        "city_mode": options.city_mode,
         "target_city_slug": options.target_city_slug,
+        "scoring_mode": options.scoring_mode,
+        "scoring_version": (
+            payloads[0].scoring_version if payloads else None
+        ),
         "image_mode": image_mode,
         "found": len(payloads),
         **counts,
         "summary": summary,
         "warnings": list(build_result.warnings),
-        "items": [
-            {
-                "external_product_id": item.external_product_id,
-                "title": item.title,
-                "price_amount": (
-                    str(item.price_amount) if item.price_amount is not None else None
-                ),
-                "currency": item.currency,
-                "merchant_url": item.merchant_url,
-                "image_url": item.image_url,
-                "availability": item.availability,
-                "normalized_category": item.normalized_category,
-                "city_connection_type": item.city_connection_type,
-                "city_connection_note": item.city_connection_note,
-                "haroona_score": item.haroona_score,
-                "score_reasons": item.score_reasons,
-                "review_notes": item.review_notes,
-            }
-            for item in payloads
-        ],
+        "items": [_candidate_item_payload(item) for item in payloads],
     }
