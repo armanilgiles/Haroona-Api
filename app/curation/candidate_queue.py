@@ -7,10 +7,6 @@ from sqlalchemy.orm import Query, Session
 
 from app.curation.affiliate_links import require_publishable_affiliate_link
 from app.curation.eligibility import INELIGIBLE, evaluate_candidate_eligibility
-from app.curation.scoring import (
-    HAROONA_SELECTION_THRESHOLD,
-    STRICT_DISTINCTIVENESS_SCORING_MODE,
-)
 from app.models import Product, ProductCandidate
 
 
@@ -120,48 +116,15 @@ def _refresh_candidate_eligibility(candidate: ProductCandidate):
 
 
 def haroona_selection_failure(candidate: ProductCandidate) -> str | None:
-    """Return the editorial reason a candidate cannot move toward discovery.
+    """Return the city-assignment blocker for approval and publication.
 
-    Platform alignment remains visible curator context, but it is intentionally
-    not part of this gate. Haroona selection is driven by the city rubric,
-    required product data, and the curator's explicit decision.
+    City-fit scores, platform alignment, distinctiveness, and Primary Match
+    results are editorial guidance. A curator may approve a broad or shared
+    city fit after choosing its final city. Objective product eligibility and
+    affiliate-link requirements are enforced separately.
     """
     if not str(candidate.target_city_slug or "").strip():
         return "A final city must be assigned before approval"
-
-    selection_score = int(candidate.haroona_score or 0)
-    if selection_score < HAROONA_SELECTION_THRESHOLD:
-        return (
-            f"Haroona selection score {selection_score}/100 is below the "
-            f"{HAROONA_SELECTION_THRESHOLD}/100 threshold"
-        )
-
-    analysis = (
-        candidate.scoring_analysis
-        if isinstance(candidate.scoring_analysis, dict)
-        else {}
-    )
-    is_strict = (
-        candidate.scoring_mode == STRICT_DISTINCTIVENESS_SCORING_MODE
-        or str(candidate.scoring_version or "").startswith(
-            STRICT_DISTINCTIVENESS_SCORING_MODE
-        )
-    )
-    if is_strict:
-        primary_match_eligible = analysis.get("primary_match_eligible")
-        if primary_match_eligible is False:
-            reasons = [
-                str(reason).replace("_", " ")
-                for reason in (analysis.get("gate_failure_reasons") or [])
-                if str(reason).strip()
-            ]
-            detail = f": {', '.join(reasons)}" if reasons else ""
-            return f"Strict city-distinctiveness gate did not pass{detail}"
-        if primary_match_eligible is not True:
-            return (
-                "Strict city-distinctiveness result is missing; rescore the "
-                "candidate before approval"
-            )
 
     return None
 

@@ -1170,7 +1170,7 @@ def _strict_destination_details(
         ]
         if gate_failures:
             reasons.append(
-                "Primary Match gate: "
+                "Primary Match advisory: "
                 + ", ".join(reason.replace("_", " ") for reason in gate_failures)
             )
 
