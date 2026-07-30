@@ -291,38 +291,68 @@ class CandidateQueueTests(unittest.TestCase):
         self.assertEqual(candidate.review_status, "approved")
         self.assertEqual(float(candidate.platform_alignment_score), 6.9)
 
-    def test_candidate_below_haroona_selection_threshold_cannot_be_approved(self):
+    def test_candidate_below_haroona_selection_threshold_can_be_approved(self):
         candidate = self._candidate("low-city-fit", review_status="pending")
         candidate.city_fit_score = 79
         candidate.haroona_score = 79
         self.db.commit()
 
-        with self.assertRaises(CandidateTransitionError) as raised:
-            approve_candidate(
-                self.db,
-                candidate,
-                reviewed_by="test-curator",
-            )
+        result = approve_candidate(
+            self.db,
+            candidate,
+            reviewed_by="test-curator",
+        )
 
-        self.assertIn("79/100 is below the 80/100 threshold", str(raised.exception))
-        self.assertEqual(candidate.review_status, "pending")
+        self.assertEqual(result["review_status"], "approved")
+        self.assertEqual(candidate.review_status, "approved")
+        self.assertEqual(candidate.haroona_score, 79)
 
-    def test_strict_candidate_without_gate_result_must_be_rescored(self):
+    def test_strict_candidate_without_gate_result_can_be_approved(self):
         candidate = self._candidate("strict-missing-gate", review_status="pending")
         candidate.scoring_mode = "strict_distinctiveness"
         candidate.scoring_version = "strict_distinctiveness_v2"
         candidate.scoring_analysis = {}
         self.db.commit()
 
-        with self.assertRaises(CandidateTransitionError) as raised:
-            approve_candidate(
-                self.db,
-                candidate,
-                reviewed_by="test-curator",
-            )
+        result = approve_candidate(
+            self.db,
+            candidate,
+            reviewed_by="test-curator",
+        )
 
-        self.assertIn("result is missing", str(raised.exception))
-        self.assertEqual(candidate.review_status, "pending")
+        self.assertEqual(result["review_status"], "approved")
+        self.assertEqual(candidate.review_status, "approved")
+
+    def test_failed_strict_distinctiveness_is_advisory_for_approval_and_publish(self):
+        candidate = self._candidate("broad-city-fit", review_status="pending")
+        candidate.scoring_mode = "strict_distinctiveness"
+        candidate.scoring_version = "strict_distinctiveness_v2"
+        candidate.scoring_analysis = {
+            "primary_match_eligible": False,
+            "match_type": "strong_multi_city_fit",
+            "gate_failure_reasons": [
+                "nearest_rival_test_failed",
+                "marketing_language_primary",
+            ],
+        }
+        candidate.haroona_score = 84
+        self.db.commit()
+
+        approve_candidate(
+            self.db,
+            candidate,
+            reviewed_by="test-curator",
+        )
+        published = publish_product_candidate(self.db, candidate)
+
+        product = (
+            self.db.query(Product)
+            .filter(Product.id == published["product_id"])
+            .one()
+        )
+        self.assertEqual(candidate.review_status, "approved")
+        self.assertTrue(product.is_active)
+        self.assertEqual(candidate.scoring_analysis["primary_match_eligible"], False)
 
 
 if __name__ == "__main__":
