@@ -178,12 +178,24 @@ class Product(Base):
     last_price_checked_at = Column(DateTime(timezone=True), nullable=True)
     price_check_status = Column(String(30), nullable=True)
     price_check_error = Column(Text, nullable=True)
+    last_product_checked_at = Column(DateTime(timezone=True), nullable=True)
+    last_link_checked_at = Column(DateTime(timezone=True), nullable=True)
+    last_seen_available_at = Column(DateTime(timezone=True), nullable=True)
+    consecutive_refresh_failures = Column(Integer, nullable=False, default=0)
+    last_refresh_status = Column(String(40), nullable=True, index=True)
+    last_refresh_error = Column(Text, nullable=True)
+    needs_refresh_review = Column(Boolean, nullable=False, default=False, index=True)
     
 
 class ProductPriceSnapshot(Base):
     __tablename__ = "product_price_snapshots"
 
-    id = Column(BigInteger, primary_key=True, index=True, autoincrement=True)
+    id = Column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+        index=True,
+        autoincrement=True,
+    )
     product_id = Column(Integer, ForeignKey("products.id", ondelete="CASCADE"), nullable=False, index=True)
 
     source = Column(String(50), nullable=False, index=True)
@@ -456,6 +468,9 @@ class ProductCandidate(Base):
     affiliate_link_verified_by = Column(String(255), nullable=True)
     affiliate_link_invalidated_at = Column(DateTime(timezone=True), nullable=True)
     affiliate_link_invalidated_by = Column(String(255), nullable=True)
+    publish_destination = Column(
+        String(20), nullable=False, default="affiliate", server_default="affiliate"
+    )
     image_url = Column(Text, nullable=True)
     availability = Column(String(50), nullable=True, index=True)
     normalized_category = Column(String(80), nullable=True, index=True)
@@ -530,6 +545,10 @@ class ProductCandidate(Base):
             "'no_eligible_offer', 'failed', 'invalid'"
             ")",
             name="ck_product_candidates_affiliate_link_status",
+        ),
+        CheckConstraint(
+            "publish_destination IN ('affiliate', 'retailer')",
+            name="ck_product_candidates_publish_destination",
         ),
     )
 

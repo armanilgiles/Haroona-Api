@@ -44,6 +44,12 @@ AFFILIATE_LINK_STATUSES = {
 LEGACY_AFFILIATE_LINK_STATUSES = {"not_requested", "generated"}
 
 TAKEADS_PROVIDER = "takeads"
+PUBLISH_DESTINATION_AFFILIATE = "affiliate"
+PUBLISH_DESTINATION_RETAILER = "retailer"
+PUBLISH_DESTINATIONS = {
+    PUBLISH_DESTINATION_AFFILIATE,
+    PUBLISH_DESTINATION_RETAILER,
+}
 AFFILIATE_GENERATION_STALE_AFTER = timedelta(minutes=2)
 _SUB_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 
@@ -57,10 +63,10 @@ class AffiliateLinkPersistenceError(RuntimeError):
 
 
 class AffiliateLinkPublicationError(ValueError):
-    code = "AFFILIATE_LINK_NOT_VERIFIED"
+    code = "PUBLISH_DESTINATION_UNAVAILABLE"
     message = (
-        "The affiliate link must be generated and verified before this product "
-        "can be published."
+        "The product needs a usable verified affiliate link or direct retailer "
+        "URL before it can be published."
     )
 
     def __init__(self, message: str | None = None) -> None:
@@ -87,6 +93,15 @@ def _canonical_status(value: str | None) -> str:
         return AFFILIATE_NOT_GENERATED
     if normalized == "generated":
         return AFFILIATE_READY_TO_VERIFY
+    return normalized
+
+
+def canonical_publish_destination(value: str | None) -> str:
+    normalized = (_clean(value) or PUBLISH_DESTINATION_AFFILIATE).lower()
+    if normalized not in PUBLISH_DESTINATIONS:
+        raise AffiliateLinkTransitionError(
+            "Publish destination must be 'affiliate' or 'retailer'"
+        )
     return normalized
 
 
@@ -132,6 +147,7 @@ def affiliate_link_payload(candidate: ProductCandidate) -> dict[str, Any]:
         "verified_by": candidate.affiliate_link_verified_by,
         "invalidated_at": candidate.affiliate_link_invalidated_at,
         "invalidated_by": candidate.affiliate_link_invalidated_by,
+        **publication_destination_payload(candidate),
     }
 
 
@@ -143,33 +159,143 @@ def affiliate_link_is_publishable(candidate: ProductCandidate) -> bool:
     )
 
 
+def publication_destination_payload(
+    candidate: ProductCandidate,
+) -> dict[str, Any]:
+    preferred = canonical_publish_destination(candidate.publish_destination)
+    affiliate_ready = affiliate_link_is_publishable(candidate)
+    retailer_ready = _valid_http_url(candidate.merchant_url)
+
+    resolved: str | None = None
+    if preferred == PUBLISH_DESTINATION_AFFILIATE and affiliate_ready:
+        resolved = PUBLISH_DESTINATION_AFFILIATE
+    elif retailer_ready:
+        resolved = PUBLISH_DESTINATION_RETAILER
+
+    return {
+        "publish_destination": preferred,
+        "resolved_publish_destination": resolved,
+        "using_retailer_fallback": bool(
+            preferred == PUBLISH_DESTINATION_AFFILIATE
+            and resolved == PUBLISH_DESTINATION_RETAILER
+        ),
+    }
+
+
 def affiliate_link_publish_block_reason(candidate: ProductCandidate) -> str | None:
-    if affiliate_link_is_publishable(candidate):
+    destination = publication_destination_payload(candidate)
+    if destination["resolved_publish_destination"]:
         return None
 
+    preferred = destination["publish_destination"]
     status = _canonical_status(candidate.affiliate_link_status)
+    if preferred == PUBLISH_DESTINATION_RETAILER:
+        return "Add a valid direct retailer URL before publishing."
     if status == AFFILIATE_GENERATING:
-        return "Wait for affiliate-link generation to finish before publishing."
+        return (
+            "Affiliate-link generation is still running and no valid direct "
+            "retailer fallback is available."
+        )
     if status == AFFILIATE_READY_TO_VERIFY:
-        return "Open and verify the affiliate link before publishing."
+        return (
+            "Open and verify the affiliate link, or add a valid direct retailer "
+            "URL to use as fallback."
+        )
     if status == AFFILIATE_NO_ELIGIBLE_OFFER:
-        return "This product has no eligible Takeads offer."
+        return (
+            "This product has no eligible Takeads offer and no valid direct "
+            "retailer URL."
+        )
     if status == AFFILIATE_FAILED:
-        return "Retry affiliate-link generation before publishing."
+        return (
+            "Retry affiliate-link generation or add a valid direct retailer "
+            "URL before publishing."
+        )
     if status == AFFILIATE_INVALID:
         return (
-            "The affiliate link was reported invalid. Regenerate and verify it "
-            "before publishing."
+            "The affiliate link was reported invalid and no valid direct "
+            "retailer fallback is available."
         )
     if status == AFFILIATE_VERIFIED:
-        return "Affiliate verification is incomplete. Verify the link again."
-    return "Generate an affiliate link before publishing."
+        return (
+            "Affiliate verification is incomplete and no valid direct retailer "
+            "fallback is available."
+        )
+    return (
+        "Generate and verify an affiliate link, or add a valid direct retailer "
+        "URL before publishing."
+    )
 
 
 def require_publishable_affiliate_link(candidate: ProductCandidate) -> None:
+    """Require a usable selected destination, including retailer fallback.
+
+    The historical function name is retained for compatibility with the
+    existing queue and publisher imports.
+    """
     reason = affiliate_link_publish_block_reason(candidate)
     if reason:
         raise AffiliateLinkPublicationError(reason)
+
+
+def sync_candidate_product_destination(
+    db: Session,
+    candidate: ProductCandidate,
+) -> str | None:
+    if not candidate.promoted_product_id:
+        return None
+
+    product = (
+        db.query(Product)
+        .filter(Product.id == candidate.promoted_product_id)
+        .first()
+    )
+    if not product or not product.is_active:
+        return None
+
+    destination = publication_destination_payload(candidate)
+    resolved = destination["resolved_publish_destination"]
+    if not resolved:
+        raise AffiliateLinkTransitionError(
+            affiliate_link_publish_block_reason(candidate)
+            or "No usable publish destination is available"
+        )
+
+    product.merchant_url = _clean(candidate.merchant_url)
+    if resolved == PUBLISH_DESTINATION_AFFILIATE:
+        product.affiliate_url = _clean(candidate.affiliate_url)
+        product.is_affiliate = True
+    else:
+        product.affiliate_url = None
+        product.is_affiliate = False
+    product.last_price_checked_at = datetime.now(timezone.utc)
+    product.price_check_status = "curator_destination_sync"
+    product.price_check_error = None
+    return resolved
+
+
+def set_candidate_publish_destination(
+    db: Session,
+    candidate: ProductCandidate,
+    *,
+    destination: str,
+) -> dict[str, Any]:
+    if not candidate.id:
+        raise AffiliateLinkTransitionError("Candidate not found")
+
+    locked = _locked_candidate(db, candidate.id)
+    if locked.review_status not in {"approved", "archived"}:
+        raise AffiliateLinkTransitionError(
+            "Approve the product before choosing its publish destination"
+        )
+
+    locked.publish_destination = canonical_publish_destination(destination)
+    synced_destination = sync_candidate_product_destination(db, locked)
+    _commit_or_raise(db, operation="set_publish_destination")
+    return {
+        **publication_destination_payload(locked),
+        "active_product_updated": synced_destination is not None,
+    }
 
 
 def resolve_candidate_workflow_status(
@@ -207,20 +333,6 @@ def _locked_candidate(db: Session, candidate_id: int) -> ProductCandidate:
     if not candidate:
         raise AffiliateLinkTransitionError("Candidate not found")
     return candidate
-
-
-def _candidate_has_active_product(
-    db: Session,
-    candidate: ProductCandidate,
-) -> bool:
-    if not candidate.promoted_product_id:
-        return False
-    return bool(
-        db.query(Product.id)
-        .filter(Product.id == candidate.promoted_product_id)
-        .filter(Product.is_active.is_(True))
-        .first()
-    )
 
 
 def _generation_is_current(candidate: ProductCandidate, now: datetime) -> bool:
@@ -279,11 +391,6 @@ def _start_generation(
             "in_progress": False,
         }
 
-    if force and _candidate_has_active_product(db, candidate):
-        raise AffiliateLinkTransitionError(
-            "Unpublish the product before regenerating its affiliate link"
-        )
-
     product_url = _clean(candidate.merchant_url)
     if not _valid_http_url(product_url):
         candidate.affiliate_link_status = AFFILIATE_FAILED
@@ -311,6 +418,7 @@ def _start_generation(
     candidate.affiliate_link_error_message = None
     candidate.affiliate_link_verified_at = None
     candidate.affiliate_link_verified_by = None
+    sync_candidate_product_destination(db, candidate)
     _commit_or_raise(db, operation="start_generation")
     logger.info(
         "affiliate_link_generation_started product_id=%s provider=%s attempt=%s",
@@ -488,6 +596,7 @@ def verify_candidate_affiliate_link(
     locked.affiliate_link_verified_by = verified_by
     locked.affiliate_link_error_code = None
     locked.affiliate_link_error_message = None
+    sync_candidate_product_destination(db, locked)
     _commit_or_raise(db, operation="verify_link")
     logger.info(
         "affiliate_link_verified product_id=%s provider=%s curator_user_id=%s",
@@ -521,11 +630,6 @@ def invalidate_candidate_affiliate_link(
         raise AffiliateLinkTransitionError(
             "The candidate does not have a generated affiliate link"
         )
-    if _candidate_has_active_product(db, locked):
-        raise AffiliateLinkTransitionError(
-            "Unpublish the product before reporting its affiliate link invalid"
-        )
-
     if current_status == AFFILIATE_INVALID:
         return {**affiliate_link_payload(locked), "reused": True}
 
@@ -540,6 +644,7 @@ def invalidate_candidate_affiliate_link(
         _clean(reason)
         or "The generated affiliate link did not open the correct product."
     )
+    sync_candidate_product_destination(db, locked)
     _commit_or_raise(db, operation="invalidate_link")
     logger.warning(
         "affiliate_link_invalidated product_id=%s provider=%s curator_user_id=%s",

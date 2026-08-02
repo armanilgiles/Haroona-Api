@@ -1,0 +1,39 @@
+{
+  "generated_at": "2026-07-30T22:28:32.769523+00:00",
+  "mode": "dry_run",
+  "results": [
+    {
+      "affiliate_final_url": null,
+      "affiliate_status": "not_checked",
+      "affiliate_url": "https://www.nobodyschild.com/en-us/products/printed-shirred-bandeau-top-2615506001",
+      "confidence": "low",
+      "currency": "USD",
+      "detected_currency": "USD",
+      "detected_price": null,
+      "detected_regular_price": null,
+      "final_url": "https://www.nobodyschild.com/en-us/products/printed-shirred-bandeau-top-2615506001",
+      "merchant": "Nobody's Child",
+      "original_url": "https://www.nobodyschild.com/en-us/products/printed-shirred-bandeau-top-2615506001",
+      "product_id": 528,
+      "reason": "The merchant blocked or rate-limited the check (HTTP 429).",
+      "refresh_status": "blocked_or_unknown",
+      "stored_price": "40.00",
+      "stored_regular_price": "40.00",
+      "stored_title": "Cream Floral Printed Shirred Bandeau Top",
+      "would_flag_for_review": false,
+      "would_update": false
+    }
+  ],
+  "summary": {
+    "affiliate_link_broken": 0,
+    "available": 0,
+    "blocked_or_unknown": 1,
+    "likely_unavailable": 0,
+    "parse_failure": 0,
+    "price_changed": 0,
+    "product_unavailable": 0,
+    "published_products_checked": 1,
+    "temporary_failure": 0,
+    "unchanged": 0
+  }
+}

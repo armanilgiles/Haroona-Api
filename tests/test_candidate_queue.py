@@ -163,18 +163,20 @@ class CandidateQueueTests(unittest.TestCase):
         self.assertEqual(result["updated"], 1)
         self.assertTrue(product.is_active)
 
-    def test_unverified_candidate_cannot_be_published(self):
+    def test_unverified_candidate_publishes_with_retailer_fallback(self):
         candidate = self._candidate("not-verified", review_status="approved")
         candidate.affiliate_link_status = "ready_to_verify"
         candidate.affiliate_link_verified_at = None
         candidate.affiliate_link_verified_by = None
         self.db.commit()
 
-        with self.assertRaises(ValueError) as raised:
-            publish_product_candidate(self.db, candidate)
+        result = publish_product_candidate(self.db, candidate)
+        product = self.db.get(Product, result["product_id"])
 
-        self.assertIn("Open and verify", str(raised.exception))
-        self.assertIsNone(candidate.promoted_product_id)
+        self.assertFalse(product.is_affiliate)
+        self.assertIsNone(product.affiliate_url)
+        self.assertEqual(product.merchant_url, candidate.merchant_url)
+        self.assertTrue(result["using_retailer_fallback"])
 
     def test_publish_keeps_original_and_tracking_urls_separate(self):
         candidate = self._candidate("separate-links", review_status="approved")
@@ -203,7 +205,7 @@ class CandidateQueueTests(unittest.TestCase):
         self.assertTrue(product.is_active)
         self.assertEqual(float(candidate.platform_alignment_score), 6.2)
 
-    def test_restore_live_requires_verified_affiliate_link(self):
+    def test_restore_live_uses_retailer_fallback_without_verified_affiliate(self):
         candidate = self._candidate(
             "restore-unverified",
             review_status="archived",
@@ -213,15 +215,19 @@ class CandidateQueueTests(unittest.TestCase):
         candidate.affiliate_url = None
         self.db.commit()
 
-        with self.assertRaises(CandidateTransitionError) as raised:
-            restore_candidate(
-                self.db,
-                candidate,
-                restored_by="test-curator",
-                restore_to="live",
-            )
+        result = restore_candidate(
+            self.db,
+            candidate,
+            restored_by="test-curator",
+            restore_to="live",
+        )
+        product = self.db.get(Product, candidate.promoted_product_id)
 
-        self.assertIn("Retry affiliate-link generation", str(raised.exception))
+        self.assertTrue(result["product_was_reactivated"])
+        self.assertTrue(product.is_active)
+        self.assertFalse(product.is_affiliate)
+        self.assertIsNone(product.affiliate_url)
+        self.assertEqual(product.merchant_url, candidate.merchant_url)
 
     def test_restore_to_pending_deactivates_a_stale_live_product(self):
         candidate = self._candidate(

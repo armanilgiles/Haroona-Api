@@ -64,8 +64,10 @@ from app.curation.affiliate_links import (
     AffiliateLinkTransitionError,
     affiliate_link_payload,
     invalidate_candidate_affiliate_link,
+    publication_destination_payload,
     resolve_candidate_workflow_status,
     resolve_takeads_affiliate_link,
+    set_candidate_publish_destination,
     verify_candidate_affiliate_link,
 )
 from app.curation.product_candidate_publisher import (
@@ -218,6 +220,10 @@ class ResolveAffiliateLinkRequest(BaseModel):
 
 class InvalidateAffiliateLinkRequest(BaseModel):
     reason: str | None = Field(None, max_length=500)
+
+
+class PublishDestinationRequest(BaseModel):
+    destination: Literal["affiliate", "retailer"]
 
 
 class PublishCandidateRequest(BaseModel):
@@ -1884,6 +1890,7 @@ def list_product_candidates(
                 "affiliate_link_verified_by": row.affiliate_link_verified_by,
                 "affiliate_link_invalidated_at": row.affiliate_link_invalidated_at,
                 "affiliate_link_invalidated_by": row.affiliate_link_invalidated_by,
+                **publication_destination_payload(row),
                 "image_url": row.image_url,
                 "availability": row.availability,
                 "normalized_category": row.normalized_category,
@@ -2287,6 +2294,36 @@ def invalidate_product_candidate_affiliate_link(
             "status": "ok",
             "candidate_id": row.id,
             "affiliate": affiliate,
+        }
+    except AffiliateLinkTransitionError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except AffiliateLinkPersistenceError as exc:
+        db.rollback()
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.patch("/product-candidates/{candidate_id}/publish-destination")
+def update_product_candidate_publish_destination(
+    candidate_id: int,
+    payload: PublishDestinationRequest,
+    db: Session = Depends(get_db),
+    _admin_user=Depends(get_admin_user),
+):
+    row = db.query(ProductCandidate).filter(ProductCandidate.id == candidate_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+
+    try:
+        publication = set_candidate_publish_destination(
+            db,
+            row,
+            destination=payload.destination,
+        )
+        return {
+            "status": "ok",
+            "candidate_id": row.id,
+            "publication": publication,
         }
     except AffiliateLinkTransitionError as exc:
         db.rollback()

@@ -1,0 +1,39 @@
+{
+  "generated_at": "2026-07-30T22:27:48.632592+00:00",
+  "mode": "dry_run",
+  "results": [
+    {
+      "affiliate_final_url": null,
+      "affiliate_status": "not_checked",
+      "affiliate_url": "https://www.tkqlhce.com/click-101726370-12398826?url=https://www.rainbowshops.com/products/wine-faux-leather-mini-pencil-skirt-3406068512527",
+      "confidence": "low",
+      "currency": "USD",
+      "detected_currency": "USD",
+      "detected_price": null,
+      "detected_regular_price": null,
+      "final_url": "https://www.rainbowshops.com/products/wine-faux-leather-mini-pencil-skirt-3406068512527",
+      "merchant": "Rainbow Shops",
+      "original_url": "https://www.rainbowshops.com/products/wine-faux-leather-mini-pencil-skirt-3406068512527",
+      "product_id": 492,
+      "reason": "The merchant blocked or rate-limited the check (HTTP 429).",
+      "refresh_status": "blocked_or_unknown",
+      "stored_price": "19.99",
+      "stored_regular_price": null,
+      "stored_title": "Wine Faux Leather Mini Pencil Skirt",
+      "would_flag_for_review": false,
+      "would_update": false
+    }
+  ],
+  "summary": {
+    "affiliate_link_broken": 0,
+    "available": 0,
+    "blocked_or_unknown": 1,
+    "likely_unavailable": 0,
+    "parse_failure": 0,
+    "price_changed": 0,
+    "product_unavailable": 0,
+    "published_products_checked": 1,
+    "temporary_failure": 0,
+    "unchanged": 0
+  }
+}

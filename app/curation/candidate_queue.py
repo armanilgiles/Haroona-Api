@@ -5,7 +5,10 @@ from datetime import datetime, timezone
 from sqlalchemy import exists
 from sqlalchemy.orm import Query, Session
 
-from app.curation.affiliate_links import require_publishable_affiliate_link
+from app.curation.affiliate_links import (
+    require_publishable_affiliate_link,
+    sync_candidate_product_destination,
+)
 from app.curation.eligibility import INELIGIBLE, evaluate_candidate_eligibility
 from app.models import Product, ProductCandidate
 
@@ -270,6 +273,7 @@ def restore_candidate(
         product.price_check_status = "curator_restore"
         candidate.review_status = "approved"
         candidate.promoted_at = candidate.promoted_at or now
+        sync_candidate_product_destination(db, candidate)
         product_was_reactivated = True
     else:
         if product and product.is_active:

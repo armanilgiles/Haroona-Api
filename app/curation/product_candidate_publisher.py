@@ -6,7 +6,8 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.curation.affiliate_links import (
-    AFFILIATE_VERIFIED,
+    PUBLISH_DESTINATION_AFFILIATE,
+    publication_destination_payload,
     require_publishable_affiliate_link,
 )
 from app.curation.candidate_queue import (
@@ -176,8 +177,13 @@ def _get_or_create_brand(db: Session, name: str, country_id: int) -> Brand:
 def _product_url(candidate: ProductCandidate) -> tuple[str | None, str | None, bool]:
     affiliate_url = _clean(candidate.affiliate_url)
     merchant_url = _clean(candidate.merchant_url)
+    destination = publication_destination_payload(candidate)[
+        "resolved_publish_destination"
+    ]
 
-    return affiliate_url, merchant_url, bool(affiliate_url)
+    if destination == PUBLISH_DESTINATION_AFFILIATE:
+        return affiliate_url, merchant_url, True
+    return None, merchant_url, False
 
 
 def publish_product_candidate(
@@ -274,6 +280,7 @@ def publish_product_candidate(
         "action": action,
         "is_active": product.is_active,
         "promoted_at": candidate.promoted_at,
+        **publication_destination_payload(candidate),
     }
 
 
@@ -288,9 +295,6 @@ def publish_approved_product_candidates(
         db.query(ProductCandidate)
         .filter(ProductCandidate.review_status == "approved")
         .filter(ProductCandidate.target_city_slug.isnot(None))
-        .filter(ProductCandidate.affiliate_link_status == AFFILIATE_VERIFIED)
-        .filter(ProductCandidate.affiliate_url.isnot(None))
-        .filter(ProductCandidate.affiliate_link_verified_at.isnot(None))
         .filter(ProductCandidate.haroona_score >= HAROONA_SELECTION_THRESHOLD)
         .filter(~candidate_has_active_product())
         .order_by(ProductCandidate.city_fit_score.desc(), ProductCandidate.id.desc())

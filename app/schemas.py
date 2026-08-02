@@ -91,6 +91,52 @@ class ProductCardOut(BaseModel):
     imageAlt: str | None = None
 
 
+class ProductCityAnalysisOut(BaseModel):
+    citySlug: str
+    cityName: str
+    score: int | None = None
+    confidence: int | None = None
+    matchLabel: str
+    matchType: str | None = None
+    rank: int
+    explanation: str | None = None
+
+
+class ProductDetailOut(BaseModel):
+    productId: str
+    dbProductId: int
+    productName: str
+    brandName: str | None = None
+    price: str | None = None
+    originalPrice: str | None = None
+    currency: str
+    shippingText: str | None = None
+    productImage: ImageAssetOut | None = None
+    additionalImages: list[ImageAssetOut] = Field(default_factory=list)
+    logoImage: ImageAssetOut | None = None
+    description: str | None = None
+    details: list[str] = Field(default_factory=list)
+    category: str | None = None
+    style: str | None = None
+    vibe: str | None = None
+    styleTags: list[str] = Field(default_factory=list)
+    discoveryLabel: str | None = None
+    cityConnectionType: str | None = None
+    cityConnectionLocation: str | None = None
+    cityConnectionNote: str | None = None
+    citySlug: str | None = None
+    cityName: str | None = None
+    cityAnalysis: list[ProductCityAnalysisOut] = Field(default_factory=list)
+    whyItFits: str | None = None
+    affiliateUrl: str | None = None
+    merchantUrl: str | None = None
+    isAffiliate: bool | None = None
+    merchantDestinationAvailable: bool = False
+    availabilityStatus: str
+    isAvailable: bool
+    isSaved: bool | None = None
+
+
 class ProductOut(BaseModel):
     id: int
     name: str

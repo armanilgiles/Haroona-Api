@@ -5,7 +5,6 @@ from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from fastapi import HTTPException
 import requests
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -18,11 +17,12 @@ from app.curation.affiliate_links import (
     AFFILIATE_NOT_GENERATED,
     AFFILIATE_READY_TO_VERIFY,
     AFFILIATE_VERIFIED,
-    AffiliateLinkPublicationError,
+    PUBLISH_DESTINATION_RETAILER,
     _finalize_generation,
     affiliate_link_payload,
     invalidate_candidate_affiliate_link,
     resolve_takeads_affiliate_link,
+    set_candidate_publish_destination,
     verify_candidate_affiliate_link,
 )
 from app.curation.product_candidate_publisher import publish_product_candidate
@@ -427,7 +427,7 @@ class TakeadsAffiliateLinkTests(unittest.TestCase):
 
     @patch.dict(os.environ, {"TAKEADS_PUBLIC_KEY": "test-public-key"})
     @patch("app.curation.takeads_client.requests.put")
-    def test_invalidation_preserves_url_and_blocks_publication(self, mock_put):
+    def test_invalidation_preserves_url_and_publishes_retailer_fallback(self, mock_put):
         candidate = self._candidate("invalid")
         mock_put.return_value = self._success(candidate)
         resolve_takeads_affiliate_link(self.db, candidate)
@@ -452,8 +452,12 @@ class TakeadsAffiliateLinkTests(unittest.TestCase):
             candidate.affiliate_link_invalidated_by,
             "curator@example.com",
         )
-        with self.assertRaises(AffiliateLinkPublicationError):
-            publish_product_candidate(self.db, candidate)
+        published = publish_product_candidate(self.db, candidate)
+        product = self.db.get(Product, published["product_id"])
+        self.assertFalse(product.is_affiliate)
+        self.assertIsNone(product.affiliate_url)
+        self.assertEqual(product.merchant_url, candidate.merchant_url)
+        self.assertTrue(published["using_retailer_fallback"])
 
     @patch.dict(os.environ, {"TAKEADS_PUBLIC_KEY": "test-public-key"})
     @patch("app.curation.takeads_client.requests.put")
@@ -482,7 +486,7 @@ class TakeadsAffiliateLinkTests(unittest.TestCase):
         self.assertIsNone(candidate.affiliate_link_verified_at)
         self.assertIsNone(candidate.affiliate_link_verified_by)
 
-    def test_direct_publish_returns_conflict_until_timestamped_verification(self):
+    def test_direct_publish_uses_retailer_fallback_until_verification(self):
         from app.routers.catalog_admin import PublishCandidateRequest, publish_candidate
 
         candidate = self._candidate("publish-conflict")
@@ -491,19 +495,18 @@ class TakeadsAffiliateLinkTests(unittest.TestCase):
         self.db.commit()
         admin = SimpleNamespace(id="curator-3", email="curator@example.com")
 
-        with self.assertRaises(HTTPException) as raised:
-            publish_candidate(
-                candidate.id,
-                PublishCandidateRequest(published_by="spoofed"),
-                self.db,
-                admin,
-            )
-
-        self.assertEqual(raised.exception.status_code, 409)
-        self.assertEqual(
-            raised.exception.detail["code"],
-            "AFFILIATE_LINK_NOT_VERIFIED",
+        result = publish_candidate(
+            candidate.id,
+            PublishCandidateRequest(published_by="spoofed"),
+            self.db,
+            admin,
         )
+        product = self.db.get(Product, result["product_id"])
+
+        self.assertFalse(product.is_affiliate)
+        self.assertIsNone(product.affiliate_url)
+        self.assertEqual(product.merchant_url, candidate.merchant_url)
+        self.assertTrue(result["using_retailer_fallback"])
 
     @patch.dict(os.environ, {"TAKEADS_PUBLIC_KEY": "test-public-key"})
     @patch("app.curation.takeads_client.requests.put")
@@ -541,7 +544,7 @@ class TakeadsAffiliateLinkTests(unittest.TestCase):
 
     @patch.dict(os.environ, {"TAKEADS_PUBLIC_KEY": "test-public-key"})
     @patch("app.curation.takeads_client.requests.put")
-    def test_active_legacy_product_is_not_unpublished_or_regenerated(self, mock_put):
+    def test_active_product_falls_back_while_affiliate_link_regenerates(self, mock_put):
         candidate = self._candidate("legacy-active")
         product = Product(
             external_id="legacy-active",
@@ -563,13 +566,82 @@ class TakeadsAffiliateLinkTests(unittest.TestCase):
         candidate.affiliate_link_status = AFFILIATE_VERIFIED
         candidate.affiliate_link_verified_at = datetime.now(timezone.utc)
         self.db.commit()
+        mock_put.return_value = self._success(
+            candidate,
+            "https://tatrck.com/h/regenerated-live",
+        )
 
-        with self.assertRaisesRegex(ValueError, "Unpublish"):
-            resolve_takeads_affiliate_link(self.db, candidate, force=True)
+        result = resolve_takeads_affiliate_link(self.db, candidate, force=True)
 
         self.assertTrue(product.is_active)
-        self.assertEqual(product.affiliate_url, "https://tatrck.com/h/legacy")
-        mock_put.assert_not_called()
+        self.assertFalse(product.is_affiliate)
+        self.assertIsNone(product.affiliate_url)
+        self.assertEqual(product.merchant_url, candidate.merchant_url)
+        self.assertEqual(result["status"], AFFILIATE_READY_TO_VERIFY)
+        mock_put.assert_called_once()
+
+    @patch.dict(os.environ, {"TAKEADS_PUBLIC_KEY": "test-public-key"})
+    @patch("app.curation.takeads_client.requests.put")
+    def test_live_retailer_fallback_upgrades_and_downgrades_with_verification(
+        self,
+        mock_put,
+    ):
+        candidate = self._candidate("live-fallback")
+        mock_put.return_value = self._success(
+            candidate,
+            "https://tatrck.com/h/live-fallback",
+        )
+        resolve_takeads_affiliate_link(self.db, candidate)
+        published = publish_product_candidate(self.db, candidate)
+        product = self.db.get(Product, published["product_id"])
+        self.assertFalse(product.is_affiliate)
+
+        verify_candidate_affiliate_link(
+            self.db,
+            candidate,
+            verified_by="curator@example.com",
+        )
+        self.db.refresh(product)
+        self.assertTrue(product.is_affiliate)
+        self.assertEqual(
+            product.affiliate_url,
+            "https://tatrck.com/h/live-fallback",
+        )
+
+        invalidate_candidate_affiliate_link(
+            self.db,
+            candidate,
+            invalidated_by="curator@example.com",
+            reason="Redirected to the retailer homepage",
+        )
+        self.db.refresh(product)
+        self.assertFalse(product.is_affiliate)
+        self.assertIsNone(product.affiliate_url)
+        self.assertEqual(product.merchant_url, candidate.merchant_url)
+
+    def test_direct_retailer_preference_persists_and_updates_live_product(self):
+        candidate = self._candidate("retailer-preference")
+        candidate.affiliate_link_status = AFFILIATE_VERIFIED
+        candidate.affiliate_url = "https://tatrck.com/h/retailer-preference"
+        candidate.affiliate_link_verified_at = datetime.now(timezone.utc)
+        self.db.commit()
+        published = publish_product_candidate(self.db, candidate)
+        product = self.db.get(Product, published["product_id"])
+        self.assertTrue(product.is_affiliate)
+
+        result = set_candidate_publish_destination(
+            self.db,
+            candidate,
+            destination=PUBLISH_DESTINATION_RETAILER,
+        )
+        self.db.refresh(candidate)
+        self.db.refresh(product)
+
+        self.assertEqual(candidate.publish_destination, "retailer")
+        self.assertEqual(result["resolved_publish_destination"], "retailer")
+        self.assertTrue(result["active_product_updated"])
+        self.assertFalse(product.is_affiliate)
+        self.assertIsNone(product.affiliate_url)
 
     def test_rescan_preserves_state_for_same_url_and_resets_changed_url(self):
         candidate = self._candidate("rescan")
