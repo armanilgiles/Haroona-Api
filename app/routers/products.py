@@ -1,3 +1,5 @@
+import math
+import re
 from typing import Any, List
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -19,6 +21,7 @@ from app.schemas import (
     ImageAssetOut,
     ProductCardOut,
     ProductCityAnalysisOut,
+    ProductCityScoreComponentOut,
     ProductDetailOut,
 )
 from app.utils.brand_registry import lookup_logo_url
@@ -125,6 +128,96 @@ MATCH_LABELS = {
     "legacy_haroona_selection": "Haroona Selection",
     "legacy_city_fit": "City Fit",
 }
+
+CITY_SCORE_COMPONENT_LABELS = {
+    "visual_aesthetic": "Visual",
+    "climate_practicality": "Climate",
+    "lifestyle_occasion": "Lifestyle",
+    "distinctive_enhancement": "Distinctiveness",
+}
+CITY_SCORE_COMPONENT_ORDER = tuple(CITY_SCORE_COMPONENT_LABELS)
+CITY_SCORE_REASON_KEYS = {
+    "visual": "visual_aesthetic",
+    "climate": "climate_practicality",
+    "lifestyle": "lifestyle_occasion",
+    "distinctive": "distinctive_enhancement",
+    "distinctiveness": "distinctive_enhancement",
+}
+SCORE_FRACTION_RE = re.compile(r"(-?\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)")
+
+
+def _finite_number(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _component_reasons(analysis: dict[str, Any], key: str) -> list[str]:
+    raw_reasons = analysis.get("component_reasons")
+    if not isinstance(raw_reasons, dict):
+        return []
+    values = raw_reasons.get(key)
+    if not isinstance(values, list):
+        return []
+    return _unique_text(values, limit=3)
+
+
+def _city_score_components(
+    item: dict[str, Any],
+    analysis: dict[str, Any],
+) -> list[ProductCityScoreComponentOut]:
+    points = analysis.get("component_points")
+    maximums = analysis.get("component_max_points")
+    components: list[ProductCityScoreComponentOut] = []
+
+    if isinstance(points, dict) and isinstance(maximums, dict):
+        for key in CITY_SCORE_COMPONENT_ORDER:
+            score = _finite_number(points.get(key))
+            max_score = _finite_number(maximums.get(key))
+            if score is None or max_score is None or max_score <= 0:
+                continue
+            components.append(
+                ProductCityScoreComponentOut(
+                    key=key,
+                    label=CITY_SCORE_COMPONENT_LABELS[key],
+                    score=score,
+                    maxScore=max_score,
+                    reasons=_component_reasons(analysis, key),
+                )
+            )
+        if components:
+            return components
+
+    # Older candidate rows predate structured component persistence. Their
+    # score reasons still contain the real weighted points emitted by the
+    # scoring engine, so expose those values without recomputing a score.
+    score_reasons = item.get("score_reasons")
+    if not isinstance(score_reasons, list):
+        return []
+    parsed: dict[str, ProductCityScoreComponentOut] = {}
+    for raw_reason in score_reasons:
+        reason = _clean_text(raw_reason)
+        if not reason:
+            continue
+        first_word = reason.split(maxsplit=1)[0].lower()
+        key = CITY_SCORE_REASON_KEYS.get(first_word)
+        fractions = SCORE_FRACTION_RE.findall(reason)
+        if not key or not fractions:
+            continue
+        raw_score, raw_max_score = fractions[-1]
+        score = _finite_number(raw_score)
+        max_score = _finite_number(raw_max_score)
+        if score is None or max_score is None or max_score <= 0:
+            continue
+        parsed[key] = ProductCityScoreComponentOut(
+            key=key,
+            label=CITY_SCORE_COMPONENT_LABELS[key],
+            score=score,
+            maxScore=max_score,
+        )
+    return [parsed[key] for key in CITY_SCORE_COMPONENT_ORDER if key in parsed]
 
 DISCOVERY_LABELS = {
     "local_boutique": "Local Boutique",
@@ -325,6 +418,7 @@ def _city_analysis(
                 "match_type": _clean_text(item.get("match_type")),
                 "primary_match_eligible": item.get("primary_match_eligible"),
                 "explanation": explanation,
+                "score_components": _city_score_components(item, analysis),
             }
         )
 
@@ -350,6 +444,7 @@ def _city_analysis(
             matchType=item["match_type"],
             rank=rank,
             explanation=item["explanation"],
+            scoreComponents=item["score_components"],
         )
         for rank, item in enumerate(normalized_rows, start=1)
     ]

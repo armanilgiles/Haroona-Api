@@ -69,6 +69,14 @@ class ImageAssetOut(BaseModel):
     height: int | None = None
 
 
+class ProductCityScoreComponentOut(BaseModel):
+    key: str
+    label: str
+    score: float
+    maxScore: float
+    reasons: list[str] = Field(default_factory=list)
+
+
 class ProductCardOut(BaseModel):
     productId: str
     productName: str
@@ -100,6 +108,7 @@ class ProductCityAnalysisOut(BaseModel):
     matchType: str | None = None
     rank: int
     explanation: str | None = None
+    scoreComponents: list[ProductCityScoreComponentOut] = Field(default_factory=list)
 
 
 class ProductDetailOut(BaseModel):

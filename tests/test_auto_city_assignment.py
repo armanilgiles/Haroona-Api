@@ -232,6 +232,17 @@ class AutoCityRequestAndScoringTests(unittest.TestCase):
             list(range(1, len(self.active_city_slugs) + 1)),
         )
         self.assertEqual(
+            assignment.city_candidates[0]["scoring_analysis"][
+                "component_max_points"
+            ],
+            {
+                "visual_aesthetic": 30.0,
+                "climate_practicality": 25.0,
+                "lifestyle_occasion": 20.0,
+                "distinctive_enhancement": 25.0,
+            },
+        )
+        self.assertEqual(
             list(STRICT_COMPONENT_WEIGHTS.values()),
             [30, 25, 20, 25],
         )

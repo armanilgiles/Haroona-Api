@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.curation.scoring import (
     HAROONA_SELECTION_THRESHOLD,
+    SCORING_MODE_WEIGHTS,
     SUPPORTED_CITY_SLUGS,
     CityScoreDetail,
     ScoreResult,
@@ -67,6 +68,7 @@ def active_scoring_city_slugs(db: Session) -> tuple[str, ...]:
 
 
 def _detail_analysis_payload(detail: CityScoreDetail) -> dict[str, Any]:
+    component_max_points = SCORING_MODE_WEIGHTS.get(detail.scoring_mode, {})
     return {
         "scoring_mode": detail.scoring_mode,
         "scoring_version": detail.scoring_version,
@@ -88,6 +90,15 @@ def _detail_analysis_payload(detail: CityScoreDetail) -> dict[str, Any]:
         "comparative_reason": detail.comparative_reason,
         "marketing_language_primary": detail.marketing_language_primary,
         "recognized_concepts": list(detail.recognized_concepts),
+        "component_scores": dict(detail.component_scores),
+        "component_points": dict(detail.component_points),
+        "component_max_points": {
+            key: float(value) for key, value in component_max_points.items()
+        },
+        "component_reasons": {
+            key: list(reasons)
+            for key, reasons in detail.component_reasons.items()
+        },
     }
 
 

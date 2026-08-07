@@ -117,6 +117,12 @@ class ProductDetailEndpointTests(unittest.TestCase):
                     "confidence": 86,
                     "match_type": "strong_multi_city_fit",
                     "primary_match_eligible": False,
+                    "score_reasons": [
+                        "Visual compatibility 8/10 (24/30)",
+                        "Climate compatibility 8/10 (20/25)",
+                        "Lifestyle compatibility 8/10 (16/20)",
+                        "Distinctiveness 21/25",
+                    ],
                     "scoring_analysis": {
                         "comparative_reason": "Clean lines also suit Copenhagen."
                     },
@@ -128,7 +134,22 @@ class ProductDetailEndpointTests(unittest.TestCase):
                     "match_type": "distinctive_primary_match",
                     "primary_match_eligible": True,
                     "scoring_analysis": {
-                        "comparative_reason": "Structured tailoring is strongest for London."
+                        "comparative_reason": "Structured tailoring is strongest for London.",
+                        "component_points": {
+                            "visual_aesthetic": 27,
+                            "climate_practicality": 22.5,
+                            "lifestyle_occasion": 18,
+                            "distinctive_enhancement": 20.5,
+                        },
+                        "component_max_points": {
+                            "visual_aesthetic": 30,
+                            "climate_practicality": 25,
+                            "lifestyle_occasion": 20,
+                            "distinctive_enhancement": 25,
+                        },
+                        "component_reasons": {
+                            "visual_aesthetic": ["Structured silhouette aligns strongly."],
+                        },
                     },
                 },
             ],
@@ -169,6 +190,18 @@ class ProductDetailEndpointTests(unittest.TestCase):
         self.assertEqual([item.score for item in detail.cityAnalysis], [88, 81])
         self.assertEqual(detail.cityAnalysis[0].matchLabel, "Primary Match")
         self.assertEqual(detail.cityAnalysis[1].matchLabel, "Strong Multi-City Fit")
+        self.assertEqual(
+            [component.label for component in detail.cityAnalysis[0].scoreComponents],
+            ["Visual", "Climate", "Lifestyle", "Distinctiveness"],
+        )
+        self.assertEqual(detail.cityAnalysis[0].scoreComponents[0].score, 27)
+        self.assertEqual(detail.cityAnalysis[0].scoreComponents[0].maxScore, 30)
+        self.assertEqual(
+            detail.cityAnalysis[0].scoreComponents[0].reasons,
+            ["Structured silhouette aligns strongly."],
+        )
+        self.assertEqual(detail.cityAnalysis[1].scoreComponents[0].score, 24)
+        self.assertEqual(detail.cityAnalysis[1].scoreComponents[3].maxScore, 25)
         self.assertEqual(
             detail.details,
             ["Tailored fit", "Wool blend fabric", "Notched lapel collar"],
