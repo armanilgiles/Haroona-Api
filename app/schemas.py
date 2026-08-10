@@ -121,6 +121,7 @@ class ProductDetailOut(BaseModel):
     currency: str
     shippingText: str | None = None
     productImage: ImageAssetOut | None = None
+    originalProductImage: ImageAssetOut | None = None
     additionalImages: list[ImageAssetOut] = Field(default_factory=list)
     logoImage: ImageAssetOut | None = None
     description: str | None = None

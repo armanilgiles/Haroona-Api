@@ -28,12 +28,20 @@ from app.routers import (
 )
 from app.api.etl import router as etl_router
 from app.auth.dependencies import get_current_user
+from app.performance import install_query_metrics, measure_request
 from app.schemas import UserMeOut
 
 ENV = os.getenv("ENV", "development").lower()
 
 
+install_query_metrics()
+
 app = FastAPI(title="Haroona API")
+
+
+@app.middleware("http")
+async def performance_metrics(request, call_next):
+    return await measure_request(request, call_next)
 
 app.add_middleware(
     CORSMiddleware,
