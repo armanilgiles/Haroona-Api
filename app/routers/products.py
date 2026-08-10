@@ -3,10 +3,10 @@ import re
 from typing import Any, List
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import case, func, or_
-from sqlalchemy.orm import Session
+from sqlalchemy import and_, case, func, or_
+from sqlalchemy.orm import Session, contains_eager, joinedload
 
-from app.database import SessionLocal
+from app.database import get_db
 from app.models import (
     AwinProductFeedRaw,
     AwinProductNormalized,
@@ -28,15 +28,6 @@ from app.utils.brand_registry import lookup_logo_url
 from app.utils.normalize import normalize_brand
 
 router = APIRouter(prefix="/products", tags=["products"])
-
-
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
 
 def _price_to_str(value) -> str | None:
     if value is None:
@@ -298,9 +289,16 @@ def _normalized_product(
     if not product.normalized_row_id:
         return None, None
 
-    normalized = db.get(AwinProductNormalized, product.normalized_row_id)
-    raw = db.get(AwinProductFeedRaw, normalized.raw_id) if normalized else None
-    return normalized, raw
+    row = (
+        db.query(AwinProductNormalized, AwinProductFeedRaw)
+        .outerjoin(
+            AwinProductFeedRaw,
+            AwinProductNormalized.raw_id == AwinProductFeedRaw.id,
+        )
+        .filter(AwinProductNormalized.id == product.normalized_row_id)
+        .first()
+    )
+    return row if row else (None, None)
 
 
 def _find_product(db: Session, identifier: str) -> Product | None:
@@ -308,28 +306,25 @@ def _find_product(db: Session, identifier: str) -> Product | None:
     if not normalized_identifier:
         return None
 
-    base = db.query(Product)
-    product = (
-        base.filter(Product.external_id == normalized_identifier)
-        .order_by(Product.id.desc())
-        .first()
-    )
-    if product:
-        return product
-
-    product = (
-        base.filter(
-            (Product.source + "-" + Product.external_id) == normalized_identifier
+    predicates = [Product.external_id == normalized_identifier]
+    source, separator, external_id = normalized_identifier.partition("-")
+    if separator and source and external_id:
+        predicates.append(
+            and_(Product.source == source, Product.external_id == external_id)
         )
-        .order_by(Product.id.desc())
+    if normalized_identifier.isdigit():
+        predicates.append(Product.id == int(normalized_identifier))
+
+    return (
+        db.query(Product)
+        .options(joinedload(Product.brand), joinedload(Product.city))
+        .filter(or_(*predicates))
+        .order_by(
+            case((Product.external_id == normalized_identifier, 0), else_=1),
+            Product.id.desc(),
+        )
         .first()
     )
-    if product:
-        return product
-
-    if normalized_identifier.isdigit():
-        return db.get(Product, int(normalized_identifier))
-    return None
 
 
 def _city_analysis(
@@ -532,6 +527,14 @@ def _to_product_detail(db: Session, product: Product) -> ProductDetailOut:
             if main_image_url
             else None
         ),
+        originalProductImage=(
+            ImageAssetOut(
+                url=product.product_image_url,
+                alt=image_alt,
+            )
+            if product.optimized_product_image_url and product.product_image_url
+            else None
+        ),
         additionalImages=additional_images,
         logoImage=(
             ImageAssetOut(url=logo_url, alt=f"{brand_name} logo")
@@ -583,8 +586,8 @@ def get_products(
 ):
     query = (
         db.query(Product)
-        .join(Brand)
-        .join(Country)
+        .join(Brand, Product.brand_id == Brand.id)
+        .join(Country, Brand.country_id == Country.id)
         .outerjoin(City, Product.city_id == City.id)
         .filter(Product.is_active.is_(True))
         .filter(Product.city_id.isnot(None))
@@ -611,7 +614,12 @@ def get_products(
     else:
         query = query.order_by(shoes_last.asc(), Product.id.desc())
 
-    products = query.offset(offset).limit(limit).all()
+    products = (
+        query.options(contains_eager(Product.brand))
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
     return [_to_product_card(p) for p in products]
 
 

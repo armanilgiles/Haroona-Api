@@ -1,11 +1,12 @@
 import re
 
-from fastapi import APIRouter, Depends, Query
-from sqlalchemy import case, distinct, func, or_
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, Depends, Query, Request, Response
+from sqlalchemy import case, func, or_
+from sqlalchemy.orm import Session, contains_eager
 
 from app.database import get_db
-from app.models import Product, Brand, City, Country
+from app.http_cache import apply_conditional_cache
+from app.models import Product, Brand, City
 from app.schemas import FeedCategoryGroupOut, FeedFiltersOut, FeedProductOut, FeedResponse, ImageAssetOut
 
 
@@ -393,9 +394,8 @@ def get_feed_products(
 ):
     query = (
         db.query(Product)
-        .join(Brand)
-        .outerjoin(City)
-        .outerjoin(Country, City.country_id == Country.id)
+        .join(Brand, Product.brand_id == Brand.id)
+        .outerjoin(City, Product.city_id == City.id)
     )
 
     query = _apply_curated_catalog_gate(query)
@@ -488,9 +488,8 @@ def get_feed_products(
         query = (
             db.query(Product)
             .join(ranked_products, Product.id == ranked_products.c.product_id)
-            .join(Brand)
-            .outerjoin(City)
-            .outerjoin(Country, City.country_id == Country.id)
+            .join(Brand, Product.brand_id == Brand.id)
+            .outerjoin(City, Product.city_id == City.id)
             .filter(ranked_products.c.city_rank <= per_city_limit)
         )
 
@@ -499,14 +498,21 @@ def get_feed_products(
     query = query.order_by(*product_ordering)
 
     total = count_query.with_entities(func.count(Product.id)).scalar() or 0
-    products = query.offset(offset).limit(limit).all()
+    products = (
+        query.options(
+            contains_eager(Product.brand),
+            contains_eager(Product.city),
+        )
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
 
     items: list[FeedProductOut] = []
 
     for p in products:
         brand_name = p.brand.name if p.brand else None
         city_obj = p.city
-        country_obj = city_obj.country if city_obj else None
 
         logo_url = p.brand.logo_url if p.brand else None
         logo_alt = f"{brand_name} logo" if brand_name else "Merchant logo"
@@ -578,7 +584,15 @@ def get_feed_products(
 
 
 @router.get("/filters", response_model=FeedFiltersOut)
-def get_feed_filters(db: Session = Depends(get_db)):
+def get_feed_filters(
+    request: Request,
+    response: Response,
+    city: str | None = Query(None),
+    cities: list[str] | None = Query(None),
+    city_slugs: list[str] | None = Query(None),
+    city_connection_type: str | None = Query(None),
+    db: Session = Depends(get_db),
+):
     base = (
         db.query(Product)
         .filter(Product.is_active.is_(True))
@@ -586,42 +600,43 @@ def get_feed_filters(db: Session = Depends(get_db)):
         .filter(or_(Product.normalized_row_id.isnot(None), Product.source == "shopify"))
     )
 
-    categories = [
-        row[0]
-        for row in base.with_entities(distinct(Product.category))
-        .filter(Product.category.isnot(None))
-        .order_by(Product.category.asc())
-        .all()
-    ]
+    selected_city_slugs = _normalize_city_slugs(cities)
+    for city_slug in _normalize_city_slugs(city_slugs):
+        if city_slug not in selected_city_slugs:
+            selected_city_slugs.append(city_slug)
+    selected_city_slug = _normalize_city_slug(city)
+    if selected_city_slug and selected_city_slug not in selected_city_slugs:
+        selected_city_slugs.insert(0, selected_city_slug)
 
-    styles = [
-        row[0]
-        for row in base.with_entities(distinct(Product.style))
-        .filter(Product.style.isnot(None))
-        .order_by(Product.style.asc())
-        .all()
-    ]
+    if selected_city_slugs:
+        base = base.join(City, Product.city_id == City.id).filter(
+            City.slug.in_(selected_city_slugs)
+        )
+    if city_connection_type:
+        base = base.filter(Product.city_connection_type == city_connection_type)
 
-    vibes = [
-        row[0]
-        for row in base.with_entities(distinct(Product.vibe))
-        .filter(Product.vibe.isnot(None))
-        .order_by(Product.vibe.asc())
-        .all()
-    ]
+    metadata_rows = base.with_entities(
+        Product.name,
+        Product.category,
+        Product.style,
+        Product.vibe,
+        Product.city_connection_type,
+    ).all()
 
-    city_connection_types = [
-        row[0]
-        for row in base.with_entities(distinct(Product.city_connection_type))
-        .filter(Product.city_connection_type.isnot(None))
-        .order_by(Product.city_connection_type.asc())
-        .all()
-    ]
+    categories = sorted({row.category for row in metadata_rows if row.category})
+    styles = sorted({row.style for row in metadata_rows if row.style})
+    vibes = sorted({row.vibe for row in metadata_rows if row.vibe})
+    city_connection_types = sorted(
+        {
+            row.city_connection_type
+            for row in metadata_rows
+            if row.city_connection_type
+        }
+    )
 
-    category_rows = base.with_entities(Product.name, Product.category).all()
     category_counts: dict[str, int] = {}
-    for product_name, category in category_rows:
-        normalized_category = _resolve_product_category(product_name, category)
+    for row in metadata_rows:
+        normalized_category = _resolve_product_category(row.name, row.category)
         if not normalized_category:
             continue
 
@@ -631,10 +646,16 @@ def get_feed_filters(db: Session = Depends(get_db)):
 
     category_groups = _build_category_groups(category_counts)
 
-    return FeedFiltersOut(
+    payload = FeedFiltersOut(
         categories=categories,
         categoryGroups=category_groups,
         styles=styles,
         vibes=vibes,
         cityConnectionTypes=city_connection_types,
     )
+    not_modified = apply_conditional_cache(
+        request=request,
+        response=response,
+        payload=payload,
+    )
+    return not_modified or payload

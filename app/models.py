@@ -532,6 +532,7 @@ class ProductCandidate(Base):
         Integer,
         ForeignKey("products.id", ondelete="SET NULL"),
         nullable=True,
+        index=True,
     )
 
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), index=True)

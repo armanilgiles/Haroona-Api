@@ -3,15 +3,19 @@ from __future__ import annotations
 import hashlib
 import io
 import ipaddress
-import os
 import socket
 from dataclasses import dataclass
-from urllib.parse import quote, urlparse
+from urllib.parse import urlparse
 
-import boto3
 import requests
 from PIL import Image, ImageOps
-from botocore.config import Config
+
+from app.media.storage import (
+    MediaStorageConfigurationError,
+    build_media_storage_client,
+    build_public_media_url,
+    get_media_storage_settings,
+)
 
 
 MAX_SOURCE_BYTES = 15 * 1024 * 1024
@@ -31,15 +35,6 @@ class OptimizedProductImage:
     height: int
     key: str
     byte_count: int
-
-
-def _require_env(name: str) -> str:
-    value = os.getenv(name, "").strip()
-    if not value:
-        raise ProductImageOptimizationError(
-            f"{name} is required for product image optimization"
-        )
-    return value
 
 
 def _validate_public_https_url(url: str) -> None:
@@ -171,20 +166,6 @@ def _encode_webp(
         raise ProductImageOptimizationError("Could not decode source image") from exc
 
 
-def _build_s3_client():
-    endpoint_url = os.getenv("HAROONA_MEDIA_ENDPOINT_URL", "").strip() or None
-    region = os.getenv("HAROONA_MEDIA_REGION", "us-east-1").strip() or "us-east-1"
-
-    return boto3.client(
-        "s3",
-        endpoint_url=endpoint_url,
-        region_name=region,
-        aws_access_key_id=os.getenv("HAROONA_MEDIA_ACCESS_KEY_ID") or None,
-        aws_secret_access_key=os.getenv("HAROONA_MEDIA_SECRET_ACCESS_KEY") or None,
-        config=Config(signature_version="s3v4"),
-    )
-
-
 def optimize_and_upload_product_image(
     *,
     product_id: int,
@@ -200,8 +181,10 @@ def optimize_and_upload_product_image(
     if not 40 <= quality <= 90:
         raise ProductImageOptimizationError("quality must be between 40 and 90")
 
-    bucket = _require_env("HAROONA_MEDIA_BUCKET")
-    public_base_url = _require_env("HAROONA_MEDIA_PUBLIC_BASE_URL").rstrip("/")
+    try:
+        storage = get_media_storage_settings(require_public_base_url=True)
+    except MediaStorageConfigurationError as exc:
+        raise ProductImageOptimizationError(str(exc)) from exc
 
     source_bytes = _download_image(source_url)
     optimized_bytes, width, height = _encode_webp(
@@ -216,18 +199,17 @@ def optimize_and_upload_product_image(
     ).hexdigest()[:16]
     key = f"products/{product_id}/{fingerprint}-{width}x{height}.webp"
 
-    client = _build_s3_client()
+    client = build_media_storage_client(storage)
     client.put_object(
-        Bucket=bucket,
+        Bucket=storage.bucket,
         Key=key,
         Body=optimized_bytes,
         ContentType="image/webp",
         CacheControl="public, max-age=31536000, immutable",
     )
 
-    encoded_key = "/".join(quote(part, safe="") for part in key.split("/"))
     return OptimizedProductImage(
-        url=f"{public_base_url}/{encoded_key}",
+        url=build_public_media_url(storage, key),
         width=width,
         height=height,
         key=key,

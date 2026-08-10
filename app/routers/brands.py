@@ -1,34 +1,50 @@
 from typing import List
 
-from fastapi import APIRouter, Depends, Query, HTTPException
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, Depends, Query, HTTPException, Request, Response
+from sqlalchemy.orm import Session, contains_eager
 
-from app.database import SessionLocal
+from app.database import get_db
+from app.http_cache import apply_conditional_cache
 from app.models import Brand, Country
-from app.schemas import BrandOut, BrandLogoIn
+from app.schemas import BrandCountry, BrandOut, BrandLogoIn
 
 router = APIRouter(prefix="/brands", tags=["brands"])
 
-
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-
 @router.get("", response_model=List[BrandOut])
 def get_brands(
+    request: Request,
+    response: Response,
     country: str | None = Query(None, description="ISO country code, e.g. BR"),
     db: Session = Depends(get_db),
 ):
-    query = db.query(Brand).join(Country)
+    query = (
+        db.query(Brand)
+        .join(Country, Brand.country_id == Country.id)
+        .options(contains_eager(Brand.country))
+    )
 
     if country:
         query = query.filter(Country.code == country.upper())
 
-    return query.order_by(Brand.name).all()
+    brands = query.order_by(Brand.name).all()
+    payload = [
+        BrandOut(
+            id=brand.id,
+            name=brand.name,
+            country=BrandCountry(
+                code=brand.country.code,
+                name=brand.country.name,
+            ),
+            logoUrl=brand.logo_url,
+        )
+        for brand in brands
+    ]
+    not_modified = apply_conditional_cache(
+        request=request,
+        response=response,
+        payload=payload,
+    )
+    return not_modified or payload
 
 
 @router.patch("/{brand_id}/logo", response_model=BrandOut)

@@ -2,7 +2,7 @@ import unittest
 from datetime import datetime, timezone
 
 from fastapi import HTTPException
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
@@ -12,9 +12,9 @@ from app.routers.products import get_product_detail
 
 class ProductDetailEndpointTests(unittest.TestCase):
     def setUp(self):
-        engine = create_engine("sqlite:///:memory:")
-        Base.metadata.create_all(engine)
-        self.db = sessionmaker(bind=engine)()
+        self.engine = create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(self.engine)
+        self.db = sessionmaker(bind=self.engine)()
 
         country = Country(code="GB", name="United Kingdom")
         self.london = City(
@@ -41,6 +41,7 @@ class ProductDetailEndpointTests(unittest.TestCase):
 
     def tearDown(self):
         self.db.close()
+        self.engine.dispose()
 
     def _product(
         self,
@@ -253,6 +254,42 @@ class ProductDetailEndpointTests(unittest.TestCase):
             detail.merchantUrl,
             "https://shop.example.com/products/coat-42",
         )
+
+    def test_optimized_image_preserves_original_merchant_fallback(self):
+        product = self._product("optimized-coat")
+        product.optimized_product_image_url = "https://cdn.example.com/optimized.webp"
+        product.product_image_width = 640
+        product.product_image_height = 960
+        self.db.commit()
+
+        detail = get_product_detail("optimized-coat", db=self.db)
+
+        self.assertEqual(detail.productImage.url, "https://cdn.example.com/optimized.webp")
+        self.assertEqual(detail.productImage.width, 640)
+        self.assertEqual(detail.productImage.height, 960)
+        self.assertEqual(
+            detail.originalProductImage.url,
+            "https://cdn.example.com/coat.jpg",
+        )
+
+    def test_detail_query_budget_avoids_relationship_and_identifier_n_plus_one(self):
+        product = self._product("query-budget-coat")
+        self._candidate(product)
+        identifier = product.external_id
+        statements: list[str] = []
+
+        def record_statement(_conn, _cursor, statement, _parameters, _context, _many):
+            if statement.lstrip().upper().startswith("SELECT"):
+                statements.append(statement)
+
+        event.listen(self.engine, "before_cursor_execute", record_statement)
+        try:
+            detail = get_product_detail(identifier, db=self.db)
+        finally:
+            event.remove(self.engine, "before_cursor_execute", record_statement)
+
+        self.assertEqual(detail.productId, identifier)
+        self.assertEqual(len(statements), 3)
 
 
 if __name__ == "__main__":
