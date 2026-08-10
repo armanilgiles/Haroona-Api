@@ -12,7 +12,20 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.routers import auth, etl, health, countries, brands, products, dev, cities, feed, catalog_admin, analytics
+from app.routers import (
+    analytics,
+    auth,
+    brands,
+    catalog_admin,
+    cities,
+    countries,
+    dev,
+    etl,
+    feed,
+    health,
+    products,
+    search,
+)
 from app.api.etl import router as etl_router
 from app.auth.dependencies import get_current_user
 from app.schemas import UserMeOut
@@ -50,6 +63,7 @@ app.include_router(brands.router)
 app.include_router(products.router)
 app.include_router(cities.router)
 app.include_router(feed.router)
+app.include_router(search.router)
 app.include_router(analytics.router)
 
 # Dev/admin-only routes
@@ -84,4 +98,3 @@ def db_health(db: Session = Depends(get_db)):
 @app.get("/")
 def root():
     return {"message": "Haroona API"}
-

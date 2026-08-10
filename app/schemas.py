@@ -228,6 +228,56 @@ class FeedFiltersOut(BaseModel):
     cityConnectionTypes: list[str] = Field(default_factory=list)
 
 
+class SearchCityOut(BaseModel):
+    id: int
+    slug: str
+    name: str
+    countryCode: str
+    countryName: str
+
+
+class SearchBrandOut(BaseModel):
+    id: int
+    name: str
+    logoUrl: str | None = None
+
+
+class SearchFacetOut(BaseModel):
+    value: str
+    label: str
+    kind: str
+
+
+class SearchProductOut(BaseModel):
+    productId: str
+    dbProductId: int
+    productName: str
+    brandName: str
+    category: str | None = None
+    style: str | None = None
+    vibe: str | None = None
+    citySlug: str
+    cityName: str
+
+
+class SearchHasMoreOut(BaseModel):
+    cities: bool = False
+    categories: bool = False
+    brands: bool = False
+    styles: bool = False
+    products: bool = False
+
+
+class SearchResponse(BaseModel):
+    query: str
+    minimumQueryLength: int
+    cities: list[SearchCityOut] = Field(default_factory=list)
+    categories: list[SearchFacetOut] = Field(default_factory=list)
+    brands: list[SearchBrandOut] = Field(default_factory=list)
+    styles: list[SearchFacetOut] = Field(default_factory=list)
+    products: list[SearchProductOut] = Field(default_factory=list)
+    hasMore: SearchHasMoreOut = Field(default_factory=SearchHasMoreOut)
+
 
 class AnalyticsEventCreate(BaseModel):
     eventName: str = Field(..., min_length=1, max_length=80)
