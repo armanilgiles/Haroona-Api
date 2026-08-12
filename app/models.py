@@ -236,6 +236,8 @@ class VoiceReaction(Base):
         nullable=True,
     )
     reaction_tag = Column(String(40), nullable=False)
+    experience_type = Column(String(30), nullable=True)
+    compliment_response = Column(String(20), nullable=True)
     status = Column(String(20), nullable=False, default="pending")
     created_at = Column(
         DateTime(timezone=True),
@@ -269,8 +271,29 @@ class VoiceReaction(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "reaction_tag IN ('would_compliment', 'would_wear', 'great_fit')",
+            "reaction_tag IN ('general', 'would_compliment', 'would_wear', "
+            "'great_fit', 'great_city_fit', 'got_compliments', 'loved_fit', "
+            "'would_wear_again')",
             name="ck_voice_reactions_reaction_tag",
+        ),
+        CheckConstraint(
+            "experience_type IS NULL OR experience_type IN ('first_impression', 'wore_it')",
+            name="ck_voice_reactions_experience_type",
+        ),
+        CheckConstraint(
+            "compliment_response IS NULL OR compliment_response IN ('yes', 'no', 'not_sure')",
+            name="ck_voice_reactions_compliment_response",
+        ),
+        CheckConstraint(
+            "compliment_response IS NULL OR experience_type IS NOT NULL",
+            name="ck_voice_reactions_compliment_requires_experience",
+        ),
+        CheckConstraint(
+            "compliment_response IS NULL OR "
+            "(experience_type = 'first_impression' AND "
+            "compliment_response IN ('yes', 'no', 'not_sure')) OR "
+            "(experience_type = 'wore_it' AND compliment_response IN ('yes', 'no'))",
+            name="ck_voice_reactions_compliment_matches_experience",
         ),
         CheckConstraint(
             "status IN ('pending', 'published', 'hidden', 'deleted')",

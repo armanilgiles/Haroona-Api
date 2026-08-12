@@ -4,7 +4,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any, Literal
 
-from pydantic import BaseModel, HttpUrl, Field, field_validator
+from pydantic import BaseModel, HttpUrl, Field, field_validator, model_validator
 
 from app.media.audio import (
     MAX_VOICE_RECORDING_DURATION_SECONDS,
@@ -308,7 +308,18 @@ class AnalyticsEventOut(BaseModel):
     id: int
 
 
-VoiceReactionTag = Literal["would_compliment", "would_wear", "great_fit"]
+VoiceReactionExperienceType = Literal["first_impression", "wore_it"]
+VoiceReactionComplimentResponse = Literal["yes", "no", "not_sure"]
+VoiceReactionTag = Literal[
+    "general",
+    "would_compliment",
+    "would_wear",
+    "great_fit",
+    "great_city_fit",
+    "got_compliments",
+    "loved_fit",
+    "would_wear_again",
+]
 
 
 class VoiceReactionCreatorOut(BaseModel):
@@ -321,6 +332,8 @@ class VoiceReactionOut(BaseModel):
     id: int
     productId: int
     reactionTag: VoiceReactionTag
+    experienceType: VoiceReactionExperienceType | None = None
+    complimentResponse: VoiceReactionComplimentResponse | None = None
     cityId: int | None = None
     citySlug: str | None = None
     cityName: str | None = None
@@ -346,7 +359,9 @@ class VoiceReactionCapabilitiesOut(BaseModel):
 
 
 class VoiceReactionUploadInitIn(BaseModel):
-    reactionTag: VoiceReactionTag
+    experienceType: VoiceReactionExperienceType
+    complimentResponse: VoiceReactionComplimentResponse | None = None
+    experienceConfirmed: bool = False
     cityId: int | None = Field(default=None, gt=0)
     mimeType: str
     fileSizeBytes: int = Field(
@@ -364,6 +379,21 @@ class VoiceReactionUploadInitIn(BaseModel):
     @classmethod
     def validate_mime_type(cls, value: str) -> str:
         return normalize_audio_mime_type(value)
+
+    @model_validator(mode="after")
+    def validate_experience_details(self):
+        if (
+            self.experienceType == "wore_it"
+            and self.complimentResponse == "not_sure"
+        ):
+            raise ValueError(
+                "not_sure is only valid for a first-impression compliment response"
+            )
+        if self.experienceType == "wore_it" and not self.experienceConfirmed:
+            raise ValueError(
+                "worn-experience reactions require actual-experience confirmation"
+            )
+        return self
 
 
 class SignedMediaUploadOut(BaseModel):

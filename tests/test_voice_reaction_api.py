@@ -150,7 +150,8 @@ class VoiceReactionApiTests(unittest.TestCase):
             expires_in_seconds=900,
         )
         payload = VoiceReactionUploadInitIn(
-            reactionTag="would_compliment",
+            experienceType="first_impression",
+            complimentResponse="yes",
             cityId=self.city.id,
             mimeType="audio/webm; codecs=opus",
             fileSizeBytes=4096,
@@ -171,7 +172,9 @@ class VoiceReactionApiTests(unittest.TestCase):
         reaction = self.db.get(VoiceReaction, result.reactionId)
         self.assertEqual(reaction.status, "pending")
         self.assertEqual(reaction.user_id, self.user.id)
-        self.assertEqual(reaction.reaction_tag, "would_compliment")
+        self.assertEqual(reaction.reaction_tag, "general")
+        self.assertEqual(reaction.experience_type, "first_impression")
+        self.assertEqual(reaction.compliment_response, "yes")
         self.assertEqual(reaction.media_asset.status, "pending")
         self.assertEqual(reaction.media_asset.mime_type, "audio/webm")
         self.assertEqual(reaction.media_asset.file_size_bytes, 4096)
@@ -196,19 +199,19 @@ class VoiceReactionApiTests(unittest.TestCase):
     def test_upload_request_rejects_unsupported_or_oversized_audio(self):
         invalid_payloads = (
             {
-                "reactionTag": "would_wear",
+                "experienceType": "first_impression",
                 "mimeType": "audio/wav",
                 "fileSizeBytes": 4096,
                 "durationMs": 12_000,
             },
             {
-                "reactionTag": "would_wear",
+                "experienceType": "first_impression",
                 "mimeType": "audio/webm",
                 "fileSizeBytes": 10 * 1024 * 1024 + 1,
                 "durationMs": 12_000,
             },
             {
-                "reactionTag": "would_wear",
+                "experienceType": "first_impression",
                 "mimeType": "audio/webm",
                 "fileSizeBytes": 4096,
                 "durationMs": 90_001,
@@ -219,9 +222,49 @@ class VoiceReactionApiTests(unittest.TestCase):
             with self.subTest(payload=payload), self.assertRaises(ValidationError):
                 VoiceReactionUploadInitIn(**payload)
 
+    def test_experience_and_compliment_validation_matches_the_selected_signal(self):
+        base_payload = {
+            "mimeType": "audio/webm",
+            "fileSizeBytes": 4096,
+            "durationMs": 12_000,
+        }
+
+        first_impression = VoiceReactionUploadInitIn(
+            experienceType="first_impression",
+            complimentResponse="not_sure",
+            **base_payload,
+        )
+        wore_it = VoiceReactionUploadInitIn(
+            experienceType="wore_it",
+            experienceConfirmed=True,
+            **base_payload,
+        )
+
+        self.assertEqual(first_impression.complimentResponse, "not_sure")
+        self.assertIsNone(wore_it.complimentResponse)
+
+        invalid_payloads = (
+            {
+                "experienceType": "wore_it",
+                "experienceConfirmed": True,
+                "complimentResponse": "not_sure",
+            },
+            {
+                "experienceType": "wore_it",
+                "complimentResponse": "yes",
+            },
+            {
+                "experienceType": "something_else",
+            },
+            {},
+        )
+        for values in invalid_payloads:
+            with self.subTest(values=values), self.assertRaises(ValidationError):
+                VoiceReactionUploadInitIn(**values, **base_payload)
+
     def test_upload_init_rolls_back_when_storage_is_unavailable(self):
         payload = VoiceReactionUploadInitIn(
-            reactionTag="would_wear",
+            experienceType="first_impression",
             mimeType="audio/webm",
             fileSizeBytes=4096,
             durationMs=12_000,
@@ -245,7 +288,7 @@ class VoiceReactionApiTests(unittest.TestCase):
     def test_upload_init_rejects_a_second_published_reaction(self):
         self._published_reaction()
         payload = VoiceReactionUploadInitIn(
-            reactionTag="great_fit",
+            experienceType="first_impression",
             mimeType="audio/webm",
             fileSizeBytes=4096,
             durationMs=12_000,
@@ -266,6 +309,10 @@ class VoiceReactionApiTests(unittest.TestCase):
 
     def test_completion_verifies_object_before_publishing(self):
         reaction = self._pending_reaction()
+        reaction.reaction_tag = "general"
+        reaction.experience_type = "first_impression"
+        reaction.compliment_response = "no"
+        self.db.commit()
         metadata = MediaObjectMetadata(
             content_length=4096,
             content_type="audio/webm",
@@ -290,6 +337,9 @@ class VoiceReactionApiTests(unittest.TestCase):
         self.assertEqual(reaction.status, "published")
         self.assertEqual(reaction.media_asset.status, "ready")
         self.assertEqual(result.reaction.id, reaction.id)
+        self.assertEqual(result.reaction.reactionTag, "general")
+        self.assertEqual(result.reaction.experienceType, "first_impression")
+        self.assertEqual(result.reaction.complimentResponse, "no")
         head_object.assert_called_once_with(
             storage_key=reaction.media_asset.storage_key
         )
@@ -364,6 +414,8 @@ class VoiceReactionApiTests(unittest.TestCase):
         self.assertEqual([item.id for item in result.items], [first.id])
         self.assertEqual(len(statements), 1)
         serialized = result.model_dump()
+        self.assertIsNone(result.items[0].experienceType)
+        self.assertIsNone(result.items[0].complimentResponse)
         self.assertNotIn("storageKey", str(serialized))
         self.assertNotIn("playback", str(serialized).lower())
 
