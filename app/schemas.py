@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, HttpUrl, Field
+from pydantic import BaseModel, HttpUrl, Field, field_validator
+
+from app.media.audio import (
+    MAX_VOICE_RECORDING_DURATION_SECONDS,
+    MAX_VOICE_RECORDING_FILE_SIZE_BYTES,
+    normalize_audio_mime_type,
+)
 
 
 class UserMeOut(BaseModel):
@@ -299,3 +306,141 @@ class AnalyticsEventCreate(BaseModel):
 class AnalyticsEventOut(BaseModel):
     ok: bool = True
     id: int
+
+
+VoiceReactionTag = Literal["would_compliment", "would_wear", "great_fit"]
+
+
+class VoiceReactionCreatorOut(BaseModel):
+    id: str
+    name: str | None = None
+    avatar: str | None = None
+
+
+class VoiceReactionOut(BaseModel):
+    id: int
+    productId: int
+    reactionTag: VoiceReactionTag
+    cityId: int | None = None
+    citySlug: str | None = None
+    cityName: str | None = None
+    creator: VoiceReactionCreatorOut | None = None
+    mimeType: str
+    fileSizeBytes: int
+    durationMs: int
+    createdAt: datetime
+
+
+class VoiceReactionListOut(BaseModel):
+    items: list[VoiceReactionOut]
+    limit: int
+    offset: int
+    nextOffset: int | None = None
+    hasMore: bool = False
+
+
+class VoiceReactionCapabilitiesOut(BaseModel):
+    allowedMimeTypes: list[str]
+    maxDurationMs: int
+    maxFileSizeBytes: int
+
+
+class VoiceReactionUploadInitIn(BaseModel):
+    reactionTag: VoiceReactionTag
+    cityId: int | None = Field(default=None, gt=0)
+    mimeType: str
+    fileSizeBytes: int = Field(
+        ...,
+        gt=0,
+        le=MAX_VOICE_RECORDING_FILE_SIZE_BYTES,
+    )
+    durationMs: int = Field(
+        ...,
+        gt=0,
+        le=MAX_VOICE_RECORDING_DURATION_SECONDS * 1000,
+    )
+
+    @field_validator("mimeType")
+    @classmethod
+    def validate_mime_type(cls, value: str) -> str:
+        return normalize_audio_mime_type(value)
+
+
+class SignedMediaUploadOut(BaseModel):
+    url: str
+    method: Literal["PUT"]
+    headers: dict[str, str]
+    expiresInSeconds: int
+
+
+class VoiceReactionUploadInitOut(BaseModel):
+    reactionId: int
+    upload: SignedMediaUploadOut
+
+
+class VoiceReactionUploadCompleteOut(BaseModel):
+    reaction: VoiceReactionOut
+
+
+class VoiceReactionPlaybackOut(BaseModel):
+    url: str
+    expiresInSeconds: int
+
+
+VoiceReactionReportReason = Literal[
+    "harassment",
+    "hate",
+    "sexual",
+    "spam",
+    "privacy",
+    "off_topic",
+    "other",
+]
+
+
+class VoiceReactionReportIn(BaseModel):
+    reason: VoiceReactionReportReason
+    details: str | None = Field(default=None, max_length=500)
+
+    @field_validator("details")
+    @classmethod
+    def normalize_details(cls, value: str | None) -> str | None:
+        normalized = value.strip() if value else None
+        return normalized or None
+
+
+class VoiceReactionReportOut(BaseModel):
+    id: int
+    reactionId: int
+    reason: VoiceReactionReportReason
+    status: Literal["open", "resolved", "dismissed"]
+    createdAt: datetime
+
+
+class VoiceReactionModerationReportOut(BaseModel):
+    id: int
+    reason: VoiceReactionReportReason
+    details: str | None = None
+    status: Literal["open", "resolved", "dismissed"]
+    reporterName: str | None = None
+    createdAt: datetime
+
+
+class VoiceReactionModerationItemOut(BaseModel):
+    reaction: VoiceReactionOut
+    productName: str
+    reactionStatus: Literal["pending", "published", "hidden", "deleted"]
+    openReportCount: int
+    reports: list[VoiceReactionModerationReportOut]
+
+
+class VoiceReactionModerationListOut(BaseModel):
+    items: list[VoiceReactionModerationItemOut]
+    limit: int
+    offset: int
+    nextOffset: int | None = None
+    hasMore: bool = False
+
+
+class VoiceReactionModerationIn(BaseModel):
+    action: Literal["hide", "restore", "dismiss_reports"]

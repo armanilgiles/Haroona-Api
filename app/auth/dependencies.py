@@ -58,6 +58,12 @@ def get_admin_user(user: User = Depends(get_current_user)) -> User:
         if email.strip()
     }
 
+    if not admin_emails and os.getenv("ENV", "development").lower() == "production":
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Admin access is not configured",
+        )
+
     if admin_emails and user.email.lower() not in admin_emails:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

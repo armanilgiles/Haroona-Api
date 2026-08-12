@@ -25,6 +25,7 @@ from app.routers import (
     health,
     products,
     search,
+    voice_reactions,
 )
 from app.api.etl import router as etl_router
 from app.auth.dependencies import get_current_user
@@ -73,6 +74,7 @@ app.include_router(cities.router)
 app.include_router(feed.router)
 app.include_router(search.router)
 app.include_router(analytics.router)
+app.include_router(voice_reactions.router)
 
 # Dev/admin-only routes
 if ENV != "production":

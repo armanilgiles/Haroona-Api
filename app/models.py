@@ -5,6 +5,7 @@ from sqlalchemy import (
     Column,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     JSON,
     Numeric,
@@ -25,6 +26,18 @@ class User(Base):
     name = Column(String(255), nullable=True)
     avatar = Column(String(500), nullable=True)
     welcome_seen = Column(Boolean, nullable=False, default=False)
+
+    voice_reactions = relationship(
+        "VoiceReaction",
+        back_populates="user",
+        passive_deletes=True,
+    )
+    voice_reaction_reports = relationship(
+        "VoiceReactionReport",
+        foreign_keys="VoiceReactionReport.reporter_user_id",
+        back_populates="reporter",
+        passive_deletes=True,
+    )
 
     def __repr__(self):
         return f"<User {self.email}>"
@@ -110,6 +123,11 @@ class City(Base):
 
     country = relationship("Country", back_populates="cities")
     products = relationship("Product", back_populates="city")
+    voice_reactions = relationship(
+        "VoiceReaction",
+        back_populates="city",
+        passive_deletes=True,
+    )
 
     __table_args__ = (
         UniqueConstraint("name", "country_id", name="uq_city_name_country"),
@@ -154,6 +172,12 @@ class Product(Base):
 
     brand = relationship("Brand", back_populates="products")
     city = relationship("City", back_populates="products")
+    voice_reactions = relationship(
+        "VoiceReaction",
+        back_populates="product",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
     city_connection_type = Column(String(40), nullable=True, index=True)
     city_connection_location = Column(String(160), nullable=True)
     city_connection_note = Column(String(255), nullable=True)
@@ -186,6 +210,218 @@ class Product(Base):
     last_refresh_error = Column(Text, nullable=True)
     needs_refresh_review = Column(Boolean, nullable=False, default=False, index=True)
     
+
+class VoiceReaction(Base):
+    __tablename__ = "voice_reactions"
+
+    id = Column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    )
+    product_id = Column(
+        Integer,
+        ForeignKey("products.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    user_id = Column(
+        String(64),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    city_id = Column(
+        Integer,
+        ForeignKey("cities.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    reaction_tag = Column(String(40), nullable=False)
+    status = Column(String(20), nullable=False, default="pending")
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    product = relationship("Product", back_populates="voice_reactions")
+    user = relationship("User", back_populates="voice_reactions")
+    city = relationship("City", back_populates="voice_reactions")
+    media_asset = relationship(
+        "MediaAsset",
+        back_populates="voice_reaction",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        single_parent=True,
+        uselist=False,
+    )
+    reports = relationship(
+        "VoiceReactionReport",
+        back_populates="voice_reaction",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "reaction_tag IN ('would_compliment', 'would_wear', 'great_fit')",
+            name="ck_voice_reactions_reaction_tag",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'published', 'hidden', 'deleted')",
+            name="ck_voice_reactions_status",
+        ),
+        Index(
+            "ix_voice_reactions_product_status_created_at",
+            "product_id",
+            "status",
+            "created_at",
+        ),
+    )
+
+    def __repr__(self):
+        return f"<VoiceReaction #{self.id} product={self.product_id}>"
+
+
+class VoiceReactionReport(Base):
+    __tablename__ = "voice_reaction_reports"
+
+    id = Column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    )
+    voice_reaction_id = Column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        ForeignKey("voice_reactions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    reporter_user_id = Column(
+        String(64),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    reason = Column(String(30), nullable=False)
+    details = Column(String(500), nullable=True)
+    status = Column(String(20), nullable=False, default="open")
+    resolved_by_user_id = Column(
+        String(64),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+
+    voice_reaction = relationship("VoiceReaction", back_populates="reports")
+    reporter = relationship(
+        "User",
+        foreign_keys=[reporter_user_id],
+        back_populates="voice_reaction_reports",
+    )
+    resolved_by = relationship("User", foreign_keys=[resolved_by_user_id])
+
+    __table_args__ = (
+        CheckConstraint(
+            "reason IN ('harassment', 'hate', 'sexual', 'spam', 'privacy', 'off_topic', 'other')",
+            name="ck_voice_reaction_reports_reason",
+        ),
+        CheckConstraint(
+            "status IN ('open', 'resolved', 'dismissed')",
+            name="ck_voice_reaction_reports_status",
+        ),
+        UniqueConstraint(
+            "voice_reaction_id",
+            "reporter_user_id",
+            name="uq_voice_reaction_reports_reaction_reporter",
+        ),
+        Index(
+            "ix_voice_reaction_reports_status_created_at",
+            "status",
+            "created_at",
+        ),
+        Index(
+            "ix_voice_reaction_reports_reaction_status",
+            "voice_reaction_id",
+            "status",
+        ),
+    )
+
+    def __repr__(self):
+        return f"<VoiceReactionReport #{self.id} status={self.status}>"
+
+
+class MediaAsset(Base):
+    __tablename__ = "media_assets"
+
+    id = Column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    )
+    voice_reaction_id = Column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        ForeignKey("voice_reactions.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
+    storage_provider = Column(String(30), nullable=False, default="s3_compatible")
+    storage_key = Column(String(1024), nullable=False)
+    mime_type = Column(String(100), nullable=False)
+    file_size_bytes = Column(BigInteger, nullable=True)
+    duration_ms = Column(Integer, nullable=True)
+    status = Column(String(20), nullable=False, default="pending")
+    extra_metadata = Column(JSON, nullable=False, default=dict)
+    created_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    voice_reaction = relationship("VoiceReaction", back_populates="media_asset")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "storage_provider",
+            "storage_key",
+            name="uq_media_assets_provider_storage_key",
+        ),
+        CheckConstraint(
+            "mime_type IN ('audio/webm', 'audio/mp4', 'audio/mpeg', 'audio/ogg')",
+            name="ck_media_assets_audio_mime_type",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'uploaded', 'ready', 'failed', 'deleted')",
+            name="ck_media_assets_status",
+        ),
+        CheckConstraint(
+            "file_size_bytes IS NULL OR file_size_bytes >= 0",
+            name="ck_media_assets_file_size_nonnegative",
+        ),
+        CheckConstraint(
+            "duration_ms IS NULL OR duration_ms > 0",
+            name="ck_media_assets_duration_positive",
+        ),
+        Index("ix_media_assets_status_created_at", "status", "created_at"),
+    )
+
+    def __repr__(self):
+        return f"<MediaAsset #{self.id} status={self.status}>"
+
 
 class ProductPriceSnapshot(Base):
     __tablename__ = "product_price_snapshots"
