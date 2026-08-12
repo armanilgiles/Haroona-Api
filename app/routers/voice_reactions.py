@@ -90,6 +90,8 @@ def _serialize_reaction(reaction: VoiceReaction) -> VoiceReactionOut:
         id=reaction.id,
         productId=reaction.product_id,
         reactionTag=reaction.reaction_tag,
+        experienceType=reaction.experience_type,
+        complimentResponse=reaction.compliment_response,
         cityId=reaction.city_id,
         citySlug=reaction.city.slug if reaction.city else None,
         cityName=reaction.city.name if reaction.city else None,
@@ -532,7 +534,9 @@ def initialize_voice_reaction_upload(
         product_id=product_id,
         user_id=user.id,
         city_id=payload.cityId,
-        reaction_tag=payload.reactionTag,
+        reaction_tag="general",
+        experience_type=payload.experienceType,
+        compliment_response=payload.complimentResponse,
         status="pending",
     )
     media_asset = MediaAsset(

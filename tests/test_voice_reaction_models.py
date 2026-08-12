@@ -96,6 +96,43 @@ class VoiceReactionModelTests(unittest.TestCase):
             self.db.commit()
         self.db.rollback()
 
+    def test_general_reaction_experience_and_optional_compliment_are_constrained(self):
+        reaction = VoiceReaction(
+            product_id=self.product_id,
+            user_id=self.user_id,
+            reaction_tag="general",
+            experience_type="wore_it",
+            compliment_response="yes",
+        )
+        self.db.add(reaction)
+        self.db.commit()
+
+        self.assertEqual(reaction.experience_type, "wore_it")
+        self.assertEqual(reaction.compliment_response, "yes")
+
+        invalid_reactions = (
+            VoiceReaction(
+                product_id=self.product_id,
+                user_id=self.user_id,
+                reaction_tag="general",
+                experience_type="wore_it",
+                compliment_response="not_sure",
+            ),
+            VoiceReaction(
+                product_id=self.product_id,
+                user_id=self.user_id,
+                reaction_tag="general",
+                experience_type=None,
+                compliment_response="yes",
+            ),
+        )
+        for index, invalid_reaction in enumerate(invalid_reactions):
+            with self.subTest(index=index):
+                self.db.add(invalid_reaction)
+                with self.assertRaises(IntegrityError):
+                    self.db.commit()
+                self.db.rollback()
+
     def test_reaction_status_is_database_constrained(self):
         self.db.add(
             VoiceReaction(
